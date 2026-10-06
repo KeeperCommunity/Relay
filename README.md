@@ -1,6 +1,6 @@
 # Bitcoin Keeper Relay
 
-Relay is the database, notification and integration backend used by [Bitcoin Keeper](https://github.com/KeeperCommunity/bitcoin-keeper). The mobile app also uses the separate [Signing Server](https://github.com/bithyve/SigningServer).
+Relay is the database, notification and integration backend used by [Bitcoin Keeper](https://github.com/KeeperCommunity/bitcoin-keeper). The mobile app also uses a separate Signing Server. Full wallet flows require that server's independently reviewed public source and local setup.
 
 ## Local backend without hosted credentials
 
@@ -18,7 +18,7 @@ The health response reports `ready: true`, `mode: local`, and the capabilities a
 
 For a host Node setup, use Node 22, Python 3, Yarn 1 and a **disposable local** MongoDB. Copy `.env.example` to an ignored `.env`, set `LOCAL_DEV=true`, `ENVIRONMENT=DEVELOPMENT`, `BITCOIN_NETWORK=TESTNET`, and a local `DATABASE_URL`, then run `yarn install --frozen-lockfile --ignore-scripts`, `yarn compile`, and `yarn start`. Never copy a hosted environment file into this checkout. Local mode refuses mainnet, non-development environments and nonlocal MongoDB hosts.
 
-For app development, configure the mobile app to use these loopback Relay and channel URLs (Android emulator host routing may require `adb reverse`). Start the Signing Server from its own reviewed local setup using independent disposable test keys. The Relay Compose stack does not provide signing or recovery flows; verify those separately in the Signing Server project. No production provider credential is needed for the supported local Relay flows.
+For app development, configure the mobile app to use these loopback Relay and channel URLs (Android emulator host routing may require `adb reverse`). Once the Signing Server's public local setup is available, start it using independent disposable test keys and verify signing and recovery flows separately. Until then, external developers can reproduce the supported local Relay flows without production provider credentials.
 
 ## Hosted integrations
 
