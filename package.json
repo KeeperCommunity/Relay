@@ -15,7 +15,7 @@
     "testEnvironment": "node"
   },
   "author": "KeeperCommunity contributors",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@apple/app-store-server-library": "^1.4.0",
     "@google-cloud/storage": "^7.19.0",

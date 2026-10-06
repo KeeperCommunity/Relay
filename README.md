@@ -34,3 +34,7 @@ Deployment and provider permissions are maintainer responsibilities. Do not use 
 ## Checks and contribution
 
 Run `yarn test --runInBand` (which compiles first) and `python3 scripts/check-source-secrets.py` with Gitleaks 8.30.1. The database tests use `READINESS_MONGO_URL` pointing at a disposable MongoDB. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+## License
+
+Relay is licensed under the [MIT License](LICENSE). Dependencies retain their respective licenses.
