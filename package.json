@@ -60,7 +60,8 @@
     "typescript": "5.4.2"
   },
   "resolutions": {
-    "uuid": "11.1.1"
+    "uuid": "11.1.1",
+    "pbkdf2": "3.1.7"
   },
   "engines": {
     "node": "22.x"
