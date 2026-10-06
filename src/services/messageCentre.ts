@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import db from "../db";
 import { getReleaseTopic, getBroadcastTopic } from "../utils/getReleaseTopic";
 import { firebaseAppOptions } from "../utils/firebaseCredentials";
+import { sendFcmMulticast } from "../utils/firebaseMessaging";
 import moment from "moment";
 import { broadcastReleaseNotification } from "./notifications";
 import { NotificationType } from "../interface";
@@ -208,24 +209,18 @@ export const updateReleaseNotifications = async (build, appVersion?) => {
 
 const notifyAll = async (notification: any, FCMs: string[]) => {
   try {
-    let payload = {
+    const payload = {
       data: notification.data,
       notification: {
         title: notification.title,
         body: notification.info,
       },
       tokens: FCMs,
-      condition: null,
     };
-    const res = await admin.messaging().sendMulticast(payload); //multicast for sending to handle multiple FCMs
-    //To-Do error handling
-    if (res) {
-      return { sent: true };
-    } else {
-      return { sent: false };
-    }
+    const res = await sendFcmMulticast(payload);
+    return { sent: res.successCount > 0 };
   } catch (err) {
-    console.log(err);
+    console.log("Message centre notification delivery failed");
     return { sent: false };
   }
 };

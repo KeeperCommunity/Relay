@@ -1,0 +1,98 @@
+# Optional pairing with the public SigningServer local adapter.
+# Follow README.md to prepare that source before starting this stack.
+services:
+  mongo:
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, "quit(db.adminCommand('ping').ok ? 0 : 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  relay:
+    ports: !reset []
+    environment:
+      HEXA_ID: keeper-local-only
+      ADMIN_KEY: keeper-local-admin-only
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  signing:
+    build:
+      context: ${SIGNING_SOURCE_DIR:?Prepare the public SigningServer adapter and set SIGNING_SOURCE_DIR}
+      dockerfile: Dockerfile.local
+    environment:
+      LOCAL_DEV: "true"
+      ENVIRONMENT: TEST
+      DB_MODE: DEV
+      PORT: "3003"
+      VERSION: local-development
+      HEXA_ID: keeper-local-only
+      BIT_ADMIN_KEY: keeper-local-admin-only
+      LOCAL_DATABASE_URL: mongodb://mongo:27017/keeper_signing_local
+      RELAY: http://relay:3000/
+      MNEMONIC_IDENTIFIER_V2: local-signer-v2
+      MNEMONIC_IDENTIFIER_V3: local-signer-v3
+      INHERITANCE_MNEMONIC_IDENTIFIER_V2: local-inheritance-v2
+      INHERITANCE_MNEMONIC_IDENTIFIER_V3: local-inheritance-v3
+      RSA_PRV_KEY_IDENTIFIER: local-rsa-private
+      RSA_PUB_KEY_IDENTIFIER: local-rsa-public
+      SES_REGION: us-east-1
+      SES_SOURCE_EMAIL: local@example.invalid
+    volumes:
+      - relay-local-signing:/local-data
+    networks:
+      - relay-local
+    depends_on:
+      mongo:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:3003/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  gateway:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    # Generate the small config here so this overlay needs no extra mounted file.
+    # Construct nginx's dollar prefix without Compose variable interpolation.
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        awk 'BEGIN {
+          dollar = sprintf("%c", 36)
+          print "server { listen 3000; location / { proxy_pass http://relay:3000; } }"
+          print "server { listen 4002; location / {"
+          print "  proxy_pass http://relay:4002; proxy_http_version 1.1;"
+          print "  proxy_set_header Upgrade " dollar "http_upgrade;"
+          print "  proxy_set_header Connection \"upgrade\";"
+          print "  proxy_set_header Host " dollar "host; proxy_read_timeout 90s;"
+          print "} }"
+          print "server { listen 3003; location / { proxy_pass http://signing:3003; } }"
+        }' > /etc/nginx/conf.d/default.conf
+        exec nginx -g 'daemon off;'
+    ports:
+      - 127.0.0.1:3000:3000
+      - 127.0.0.1:4002:4002
+      - 127.0.0.1:3003:3003
+    networks:
+      - relay-local
+      - gateway-access
+    depends_on:
+      relay:
+        condition: service_healthy
+      signing:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/health && wget -q -O /dev/null http://127.0.0.1:3003/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+networks:
+  relay-local:
+    internal: true
+  gateway-access:
+volumes:
+  relay-local-signing:

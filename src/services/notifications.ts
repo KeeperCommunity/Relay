@@ -2,6 +2,7 @@ import admin from "firebase-admin";
 import { v4 as uuidv4 } from "uuid";
 import db from "../db";
 import { getReleaseTopic } from "../utils/getReleaseTopic";
+import { sendFcmMulticast } from "../utils/firebaseMessaging";
 
 // admin.initializeApp({
 //   credential: admin.credential.cert(serviceAccount as any),
@@ -152,21 +153,18 @@ const notifyAll = async (notification: any, FCMs: string[]) => {
       body: notification.body,
     },
     data: notification.data,
+    tokens: FCMs,
   };
   try {
-    const res = await admin.messaging().sendToDevice(FCMs, payload);
-
-    // console.log({ res });
-    // console.log({ results: res.results });
-    // console.log({ err: res.results[1].error });
+    const res = await sendFcmMulticast(payload);
 
     const invalidFCMs = [];
-    for (let index = 0; index < res.results.length; index++) {
+    for (let index = 0; index < res.responses.length; index++) {
       if (
-        res.results[index].error &&
-        (res.results[index].error.code ===
+        res.responses[index].error &&
+        (res.responses[index].error.code ===
           "messaging/registration-token-not-registered" ||
-          res.results[index].error.code ===
+          res.responses[index].error.code ===
             "messaging/invalid-registration-token")
       ) {
         invalidFCMs.push(FCMs[index]); // Firebase results are in sync with the order of supplied registration tokens
@@ -180,7 +178,8 @@ const notifyAll = async (notification: any, FCMs: string[]) => {
       return { sent: false, invalidFCMs };
     }
   } catch (err) {
-    console.log(err);
+    console.log("Notification delivery failed");
+    return { sent: false, invalidFCMs: [] };
   }
 };
 

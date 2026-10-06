@@ -1,6 +1,6 @@
 # Bitcoin Keeper Relay
 
-Relay is the database, notification and integration backend used by [Bitcoin Keeper](https://github.com/KeeperCommunity/bitcoin-keeper). The mobile app also uses a separate Signing Server. Full wallet flows require that server's independently reviewed public source and local setup.
+Relay is the database, notification and integration backend used by [Bitcoin Keeper](https://github.com/KeeperCommunity/bitcoin-keeper). The mobile app also uses the public [Signing Server](https://github.com/KeeperCommunity/SigningServer).
 
 ## Local backend without hosted credentials
 
@@ -9,7 +9,6 @@ Use Docker Engine and Compose. The local stack has a disposable MongoDB and bind
 From a checkout of this clean source:
 
 ```sh
-cd bitcoin-keeper-relay
 docker compose -f compose.local.yaml up --build -d
 curl --fail http://127.0.0.1:3000/health
 ```
@@ -18,7 +17,33 @@ The health response reports `ready: true`, `mode: local`, and the capabilities a
 
 For a host Node setup, use Node 22, Python 3, Yarn 1 and a **disposable local** MongoDB. Copy `.env.example` to an ignored `.env`, set `LOCAL_DEV=true`, `ENVIRONMENT=DEVELOPMENT`, `BITCOIN_NETWORK=TESTNET`, and a local `DATABASE_URL`, then run `yarn install --frozen-lockfile --ignore-scripts`, `yarn compile`, and `yarn start`. Never copy a hosted environment file into this checkout. Local mode refuses mainnet, non-development environments and nonlocal MongoDB hosts.
 
-For app development, configure the mobile app to use these loopback Relay and channel URLs (Android emulator host routing may require `adb reverse`). Once the Signing Server's public local setup is available, start it using independent disposable test keys and verify signing and recovery flows separately. Until then, external developers can reproduce the supported local Relay flows without production provider credentials.
+For app development, configure the mobile app to use these loopback Relay and channel URLs (Android emulator host routing may require `adb reverse`). The optional setup below also starts a local testnet Signing Server. Supported local Relay flows require no production provider credentials.
+
+## Pair with the public Signing Server
+
+Use Docker Compose 2.24.4 or newer for this optional stack. The public Signing Server supports installation, compilation and unit tests on its own. Its local Docker adapter is published in [app PR #7014](https://github.com/KeeperCommunity/bitcoin-keeper/pull/7014), which is still under review. The following commands pin the public adapter and the public Signing Server revision it supports. They do not fetch the older private Relay pin from that app setup.
+
+From inside this Relay checkout:
+
+```sh
+RELAY_SOURCE_DIR="$PWD"
+git clone --filter=blob:none --sparse --branch codex/contributor-dev-environment https://github.com/KeeperCommunity/bitcoin-keeper.git ../keeper-public-local-adapter
+cd ../keeper-public-local-adapter
+git sparse-checkout set dev/local-backend
+git checkout 9878d64e8f363970f686852caeb94df540d3e81a
+./dev/local-backend/dev prepare-signing
+export SIGNING_SOURCE_DIR="$PWD/dev/local-backend/.sources/signing"
+cd "$RELAY_SOURCE_DIR"
+docker compose -f compose.local.yaml -f compose.local-with-signing.yaml up --build -d --wait
+curl --fail http://127.0.0.1:3000/health
+curl --fail http://127.0.0.1:3003/health
+```
+
+This prepares Signing Server revision `b82dc4f4a8f75676b70b12545d59c7906556a92b`, verifies the adapter checksums, and starts the services behind a loopback gateway on ports 3000, 4002 and 3003. Relay, Mongo and Signing Server share an internal network with no external egress; only the gateway has host access. Signing Server creates independent disposable development identities in its named volume; preserve that volume together with Mongo when reusing local records. Do not export its contents. Local push delivery and scheduled jobs are disabled; email is captured inside the local signing volume and is never delivered.
+
+Stop this stack with `docker compose -f compose.local.yaml -f compose.local-with-signing.yaml down`. This retains the Mongo and signing volumes. The pairing verifies local service availability; bitcoin signing, recovery, inheritance and timer-dependent behavior need their own separate checks. The app's full bootstrap will need its Relay source pin updated after this clean candidate is published.
+
+The paired setup was checked on October 6, 2026 with the public revisions above: both health endpoints, synthetic Relay record create/read/update/clear, Socket.IO polling and WebSocket connections, and rejection of an unauthenticated Signing Server setup request passed. These checks used isolated local ports and disposable volumes.
 
 ## Hosted integrations
 
