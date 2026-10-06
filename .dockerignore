@@ -1,0 +1,10 @@
+.git
+.env*
+node_modules
+dist
+coverage
+*.pem
+*.p12
+*.key
+src/services/firebaseServiceAccPrivKey.json
+bhrelay-*.json

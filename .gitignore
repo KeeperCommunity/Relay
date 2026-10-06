@@ -1,0 +1,33 @@
+/node_modules
+/dist
+# misc
+# environment variables
+#
+.env*
+env*
+!.env.example
+
+/asset/acme-challenge
+
+kubecommands
+test-creds
+secrets.txt
+
+.DS_Store
+tls.key
+tls.cert
+
+sopsrelay.yaml
+sopssigning.yaml
+docker.env
+
+# Runtime credentials and local audit output must not enter source control.
+.env*
+!.env.example
+*.pem
+*.p8
+*.key
+*ServiceAccPrivKey.json
+*service-account*.json
+bhrelay-*.json
+.readiness/

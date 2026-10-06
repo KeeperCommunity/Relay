@@ -1,0 +1,29 @@
+services:
+  mongo:
+    image: mongo:7.0@sha256:9854f7139445d766a9523571d6f047530c45547460ffcf8259eb2bf4264632ca
+    volumes:
+      - relay-local-mongo:/data/db
+    networks:
+      - relay-local
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    depends_on:
+      - mongo
+    environment:
+      LOCAL_DEV: "true"
+      ENVIRONMENT: DEVELOPMENT
+      BITCOIN_NETWORK: TESTNET
+      DATABASE_URL: mongodb://mongo:27017/keeper-relay-local
+      PORT: "3000"
+      WS_PORT: "4002"
+    ports:
+      - 127.0.0.1:3000:3000
+      - 127.0.0.1:4002:4002
+    networks:
+      - relay-local
+networks:
+  relay-local:
+volumes:
+  relay-local-mongo:
