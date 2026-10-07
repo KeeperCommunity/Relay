@@ -9,3 +9,5 @@ Run `yarn audit --groups dependencies` for runtime dependencies; CI requires thi
 Keep changes to wallet signing, recovery and server-key behavior in their separately reviewed work. Provider integration changes should state which runtime identity, project and permission they need and how an unavailable provider fails. Never make an optional provider credential a condition for starting the local backend.
 
 Report security issues privately through [SECURITY.md](SECURITY.md).
+
+Follow the [pull request review policy](.github/REVIEW_POLICY.md) and complete the PR template before requesting review.
