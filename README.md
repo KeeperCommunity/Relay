@@ -47,9 +47,9 @@ The paired setup was checked on October 6, 2026 with the public revisions above:
 
 ## Backup snapshot and repair
 
-`POST /getBackupSnapshot` reads an account's encrypted recovery records in one database snapshot and returns a SHA-256 `revision`, the app image, account-scoped vault images, labels, and any unavailable vault IDs. It does not replace the backup. Invalid account identifiers return `400`; unavailable storage returns a fixed `503` response.
+`POST /getBackupSnapshot` reads an account's encrypted recovery records in one database snapshot and returns a SHA-256 `revision` covering encrypted content plus a retained account mutation generation, the app image, account-scoped vault images, labels, and any unavailable vault IDs. It does not replace the backup. Invalid account identifiers return `400`; unavailable storage returns a fixed `503` response.
 
-`POST /repairAppBackup` requires the revision just read. A stale revision returns `409` with `BACKUP_CHANGED`; the existing backup stays intact. Explicit current-state replacement must use the existing app verification/resubmission flow. Legacy full replacements cannot bypass this requirement after a revisioned repair. Collaborative accounts retain independently encrypted vault copies; no other account's ciphertext is substituted for a missing copy.
+`POST /repairAppBackup` requires the revision just read. A stale revision returns `409` with `BACKUP_CHANGED`; the existing backup stays intact. The generation advances transactionally on backup mutations and survives Delete Backup, so returning from content A to B and back to A never reuses an earlier token. Explicit current-state replacement must use the existing app verification/resubmission flow. Legacy full replacements cannot bypass this requirement after a revisioned repair. Collaborative accounts retain independently encrypted vault copies; no other account's ciphertext is substituted for a missing copy.
 
 The source includes the guarded backup implementation used by the mobile recovery protocol. Publishing it does not deploy a backend or migrate a hosted database. Before any hosted adoption, maintainers must review transaction/replica-set support and the account-scoped unique index with staging fixtures.
 

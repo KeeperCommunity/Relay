@@ -3,7 +3,8 @@ import mongoose from "mongoose";
 import {setTimeout, clearTimeout} from "timers";
 import db from "../db";
 
-// Hash encrypted recovery records, not transport ordering or Mongoose metadata.
+// Hash encrypted recovery records plus the retained account mutation generation.
+// Transport ordering and unrelated Mongoose metadata do not affect the token.
 const canonical = (value: any): string => {
   if (value === undefined || value === null) return "null";
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -55,7 +56,8 @@ async function snapshot(appId: string, session: mongoose.ClientSession) {
     throw new Error("Incomplete backup; no replacement was made");
   }
   const records = {
-    appId, wallets: appImage.wallets || {}, signers: appImage.signers || {}, nodes: appImage.nodes || [],
+    appId, generation: app ? {identity:String(app._id),version:app.backupGeneration || 0} : null,
+    wallets: appImage.wallets || {}, signers: appImage.signers || {}, nodes: appImage.nodes || [],
     vaults: allVaultImages.map(v => ({ vaultId: v.vaultId, vault: v.vault, appId: v.appId, isArchived: !!v.isArchived })).sort((a,b) => a.vaultId.localeCompare(b.vaultId)),
     unavailableVaultIds,
     labels: labels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
@@ -104,6 +106,20 @@ async function inTransaction<T>(work: (session: mongoose.ClientSession) => Promi
   } finally { await session.endSession(); }
 }
 
+async function advanceBackupGeneration(appId: string, session: mongoose.ClientSession) {
+  await db.getAppImageModel().updateOne({appId}, {$inc:{backupGeneration:1}}, {session});
+}
+
+// Legacy incremental writes also share the transaction/generation boundary.
+export async function withBackupMutation<T>(appId: string, work: (session: mongoose.ClientSession) => Promise<T>) {
+  assertAccountId(appId);
+  return inTransaction(async session => {
+    const result = await work(session);
+    if (result !== false && (!result || (result as any).updated !== false)) await advanceBackupGeneration(appId, session);
+    return result;
+  });
+}
+
 function assertAccountId(appId: unknown): asserts appId is string {
   if (typeof appId !== "string" || !appId) throw new InvalidBackupRequest("Invalid backup account");
 }
@@ -140,7 +156,8 @@ export async function deleteBackupEntities(appId: string, wallets?: string[], si
     for (const id of wallets || []) removals[`wallets.${id}`] = "";
     for (const id of signers || []) removals[`signers.${id}`] = "";
     if (Object.keys(removals).length) {
-      await db.getAppImageModel().updateOne({ appId }, { $unset: removals }, { session });
+      const result = await db.getAppImageModel().updateOne({ appId }, { $unset: removals }, { session });
+      if (result.modifiedCount) await advanceBackupGeneration(appId, session);
     }
     return { updated: true, error: "" };
   });
@@ -186,8 +203,12 @@ async function writeVaultImage(appId: string, vaultId: string, fields: any, sess
 }
 
 async function clearVaultMapsIfUnshared(appId: string, vaultId: string, session: mongoose.ClientSession) {
-  const other = await db.getAppImageModel().findOne({ appId:{$ne:appId}, vaults:vaultId }).session(session).lean();
-  if (!other) await db.getVaultMapModel().deleteMany({vaultId}).session(session);
+  const peers = await db.getAppImageModel().find({appId:{$ne:appId},vaults:vaultId}).session(session).lean() as any[];
+  for (const peer of peers) {
+    const images = await accountVaultImages(peer.appId, [vaultId], session);
+    if (images.allVaultImages.some(image => !image.isArchived)) return;
+  }
+  await db.getVaultMapModel().deleteMany({vaultId}).session(session);
 }
 
 async function removeAccountVaults(appId: string, vaultIds: string[], session: mongoose.ClientSession) {
@@ -197,8 +218,8 @@ async function removeAccountVaults(appId: string, vaultIds: string[], session: m
     // before deciding whether the final global lookup/image can be removed.
     if (legacy) await db.getVaultImageModel().updateOne({vaultId}, {$inc:{__v:1}}, {session});
     const other = await db.getAppImageModel().findOne({appId:{$ne:appId},vaults:vaultId}).session(session).lean();
+    await clearVaultMapsIfUnshared(appId, vaultId, session);
     if (!other) {
-      await db.getVaultMapModel().deleteMany({vaultId}).session(session);
       await db.getVaultImageModel().deleteMany({vaultId}).session(session);
     }
   }
@@ -213,6 +234,7 @@ export async function createBackupVaultMap(signers: any[], vaultId: string) {
     if (!vault) throw new InvalidBackupRequest("No vault image");
     await db.getVaultImageModel().updateOne({vaultId}, {$inc:{__v:1}}, {session});
     await writeVaultMaps(signers, vaultId, session);
+    await db.getAppImageModel().updateMany({vaults:vaultId}, {$inc:{backupGeneration:1}}, {session});
   });
 }
 
@@ -229,6 +251,7 @@ async function archiveBackupVaultInSession(vaultId: string, session: mongoose.Cl
   if (!existing) return false;
   await writeVaultImage(appId, vaultId, {...vaultFields(existing),isArchived:true}, session);
   await clearVaultMapsIfUnshared(appId, vaultId, session);
+  await advanceBackupGeneration(appId, session);
   return true;
 }
 
@@ -272,6 +295,7 @@ export async function saveBackupVault(data: any) {
     if (isArchived) await clearVaultMapsIfUnshared(appId, data.vaultId, session);
     else if (signersData !== undefined) await writeVaultMaps(signersData, data.vaultId, session);
     await db.getAppImageModel().updateOne({ appId }, { $addToSet: { vaults: data.vaultId } }, { session });
+    await advanceBackupGeneration(appId, session);
     return { updated: true, error: "" };
   });
 }
@@ -279,7 +303,7 @@ export async function saveBackupVault(data: any) {
 export async function deleteBackupVaults(appId: string, vaultIds: string[]) {
   if (typeof appId !== "string" || !appId || !Array.isArray(vaultIds) || vaultIds.some(id => !validRecordId(id)))
     throw new InvalidBackupRequest("Invalid vault deletion");
-  return inTransaction(async session => {
+  return withBackupMutation(appId, async session => {
     const app = await db.getAppImageModel().findOne({ appId }).session(session).lean() as any;
     if (!app) return { updated: false, error: "No app image" };
     const owned = await db.getAppVaultImageModel().find({ appId, vaultId: { $in: vaultIds } }).session(session).lean() as any[];
@@ -300,7 +324,7 @@ export async function deleteBackupVaults(appId: string, vaultIds: string[]) {
 // change together, so a failed delete cannot leave a partial backup behind.
 export async function deleteAppBackup(appId: string) {
   if (typeof appId !== "string" || !appId) throw new InvalidBackupRequest("Invalid backup account");
-  return inTransaction(async session => {
+  return withBackupMutation(appId, async session => {
     const app = await db.getAppImageModel().findOne({ appId }).session(session).lean() as any;
     if (!app) throw new InvalidBackupRequest("No backup found");
     const vaultIds: string[] = app.vaults || [];
@@ -334,8 +358,8 @@ function assertPayload(data: any) {
   if (data.labels.some(l => !l || typeof l.id !== "string" || !safeId(l.id) || typeof l.content !== "string" || !l.content) ||
       new Set(data.labels.map(l => l.id)).size !== data.labels.length) throw new InvalidBackupRequest("Invalid encrypted labels");
   for (const [id,v] of Object.entries(data.vaultObject) as [string,any][]) {
-    if (!safeId(id) || v.vaultId !== id || typeof v.vault !== "string" || !v.vault || typeof v.isArchived !== "boolean" ||
-        !Array.isArray(v.signersData) || v.signersData.some(s => !s || typeof s.signerId !== "string" || !safeId(s.signerId) || typeof s.xfpHash !== "string")) throw new InvalidBackupRequest("Invalid encrypted vault");
+    if (!safeId(id) || !v || typeof v !== "object" || Array.isArray(v) || v.vaultId !== id || typeof v.vault !== "string" || !v.vault || typeof v.isArchived !== "boolean" ||
+        !Array.isArray(v.signersData) || v.signersData.some(s => !s || typeof s.signerId !== "string" || !safeId(s.signerId) || (typeof s.xfpHash !== "string" || !s.xfpHash))) throw new InvalidBackupRequest("Invalid encrypted vault");
   }
 }
 
@@ -348,7 +372,7 @@ export async function repairAppBackup(data: any) {
 
 async function writeBackup(data: any, legacy: boolean) {
   assertPayload(data);
-  return inTransaction(async session => {
+  return withBackupMutation(data.appId, async session => {
     const current = await snapshot(data.appId, session);
     if (legacy && current.appImage.backupRevisionRequired) throw new BackupUpgradeRequired();
     if (current.revision !== data.expectedRevision) throw new BackupConflict();

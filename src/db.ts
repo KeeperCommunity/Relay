@@ -153,6 +153,8 @@ class Database {
     nodes: [{ type: String, required: false }],
     // Once repaired, unversioned full replacements must never overwrite this image.
     backupRevisionRequired: { type: Boolean, default: false },
+    // Retained by Delete Backup, preventing stale A → B → A revisions.
+    backupGeneration: { type: Number, default: 0, min: 0 },
   });
 
   private labelSchema = new Schema({

@@ -7,6 +7,7 @@ import {
   archiveBackupVault,
   deleteBackupVaults,
   getBackupSnapshot,
+  withBackupMutation,
 } from "./backupSnapshot";
 import { AppImage, AppSubscription } from "../interface";
 import db from "../db";
@@ -23,44 +24,54 @@ export const updateAppImage = async (
   nodes,
   replaceNodes = false
 ): Promise<{ updated: boolean; error?: string }> => {
+  if (typeof appId !== "string" || !appId) return {updated:false,error:"Invalid backup account"};
   const appImageModel: any = db.getAppImageModel();
   try {
-    if (replaceNodes === true && (!Array.isArray(nodes) || nodes.some(node => typeof node !== "string" || !node))) {
-      return { updated: false, error: "Invalid encrypted nodes" };
-    }
-    const appImage = await appImageModel.findOne({ appId });
-    if (appImage && walletObject) {
-      const appSubscription = await getAppSubscriptionDetails(appId);
-      if (appSubscription && !isAllowedToUpdate(appSubscription, appImage, walletObject)) {
-        return { updated: false, error: "Your current subscription plan does not allow to add more wallets" };
+    return await withBackupMutation(appId, async session => {
+      if (replaceNodes === true && (!Array.isArray(nodes) || nodes.some(node => typeof node !== "string" || !node))) {
+        return { updated: false, error: "Invalid encrypted nodes" };
       }
-    }
-    // Set individual records atomically. A delayed incremental save must not
-    // replace wallets/signers added by a concurrent repair or another device.
-    const changes: any = {};
-    if (publicId) changes.publicId = publicId;
-    if (subscription) changes.subscription = subscription;
-    if (version) changes.version = version;
-    // Legacy clients attach [] to unrelated wallet/key updates. Only explicit
-    // node replacement may clear the list; preserve legacy nonempty updates.
-    if (Array.isArray(nodes) && (replaceNodes === true || nodes.length)) changes.nodes = nodes;
-    for (const [kind, records] of [["wallets", walletObject], ["signers", signersObject]] as any[]) {
-      for (const [id, value] of Object.entries(records || {})) {
-        if (!id || /[.$]/.test(id) || ["__proto__", "constructor", "prototype"].includes(id)) {
-          return { updated:false, error:"Invalid backup record ID" };
+      const appImage = await appImageModel.findOne({ appId }).session(session);
+      if (appImage && walletObject) {
+        const appSubscription = await getAppSubscriptionDetails(appId);
+        if (appSubscription && !isAllowedToUpdate(appSubscription, appImage, walletObject)) {
+          return { updated: false, error: "Your current subscription plan does not allow to add more wallets" };
         }
-        changes[`${kind}.${id}`] = value;
       }
-    }
-    const defaults: any = { appId };
-    if (!walletObject || !Object.keys(walletObject).length) defaults.wallets = {};
-    if (!signersObject || !Object.keys(signersObject).length) defaults.signers = {};
-    if (!changes.nodes) defaults.nodes = [];
-    if (!appImage && (!publicId || !version)) return { updated:false, error:"Backup account missing" };
-    if (Object.keys(changes).length) {
-      await appImageModel.updateOne({ appId }, { $set:changes, $setOnInsert:defaults }, { upsert:true,runValidators:true });
-    }
-    return { updated:true,error:"" };
+      // Set individual records atomically. A delayed incremental save must not
+      // replace wallets/signers added by a concurrent repair or another device.
+      const changes: any = {};
+      if (publicId) changes.publicId = publicId;
+      if (subscription) changes.subscription = subscription;
+      if (version) changes.version = version;
+      // Legacy clients attach [] to unrelated wallet/key updates. Only explicit
+      // node replacement may clear the list; preserve legacy nonempty updates.
+      if (Array.isArray(nodes) && (replaceNodes === true || nodes.length)) changes.nodes = nodes;
+      for (const [kind, records] of [["wallets", walletObject], ["signers", signersObject]] as any[]) {
+        for (const [id, value] of Object.entries(records || {})) {
+          if (!id || /[.$]/.test(id) || ["__proto__", "constructor", "prototype"].includes(id)) {
+            return { updated:false, error:"Invalid backup record ID" };
+          }
+          changes[`${kind}.${id}`] = value;
+        }
+      }
+      const defaults: any = { appId };
+      if (!walletObject || !Object.keys(walletObject).length) defaults.wallets = {};
+      if (!signersObject || !Object.keys(signersObject).length) defaults.signers = {};
+      if (!changes.nodes) defaults.nodes = [];
+      if (!appImage && (!publicId || !version)) return { updated:false, error:"Backup account missing" };
+      // Old createNewApp records used [] for empty maps. Convert only empty
+      // containers in this transaction before setting a per-record dotted path.
+      const emptyLegacyMaps: any = {};
+      for (const kind of ["wallets", "signers"]) {
+        if (Array.isArray(appImage?.[kind]) && appImage[kind].length === 0) emptyLegacyMaps[kind] = {};
+      }
+      if (Object.keys(emptyLegacyMaps).length) await appImageModel.updateOne({appId}, {$set:emptyLegacyMaps}, {session});
+      if (Object.keys(changes).length) {
+        await appImageModel.updateOne({ appId }, { $set:changes, $setOnInsert:defaults }, { upsert:true,runValidators:true,session });
+      }
+      return { updated:true,error:"" };
+    });
   } catch {
     return { updated:false,error:"Backup update failed" };
   }
@@ -299,22 +310,24 @@ export const migrateXfp = async (
   signerChanges: SignerChange[]
 ) => {
   try {
-    const appImageModel: any = db.getAppImageModel();
-    const [appImage] = await appImageModel.find({ appId });
-    let signersObject = { ...appImage.signers };
-    if (appImage) {
-      for (const change of signerChanges) {
-        if (signersObject[change.oldSignerId] !== undefined) {
-          delete signersObject[change.oldSignerId];
+    return await withBackupMutation(appId, async session => {
+      const appImageModel: any = db.getAppImageModel();
+      const [appImage] = await appImageModel.find({ appId }).session(session);
+      let signersObject = { ...appImage?.signers };
+      if (appImage) {
+        for (const change of signerChanges) {
+          if (signersObject[change.oldSignerId] !== undefined) {
+            delete signersObject[change.oldSignerId];
+          }
+          signersObject[change.newSignerId] = change.newSignerDetails;
         }
-        signersObject[change.newSignerId] = change.newSignerDetails;
+        appImage.signers = signersObject;
+        await appImage.save({session});
+        return true;
+      } else {
+        return false;
       }
-      appImage.signers = signersObject;
-      await appImage.save();
-      return true;
-    } else {
-      return false;
-    }
+    });
   } catch (err) {
     console.log(err);
     return false;
@@ -323,49 +336,51 @@ export const migrateXfp = async (
 
 export const modifyLabels = async (appId, addLabels, deleteLabels) => {
   try {
-    const appImageModel: any = db.getAppImageModel();
-    const labelModel: any = db.getLabelModel();
-    let appImage = await appImageModel.findOne({ appId });
+    return await withBackupMutation(appId, async session => {
+      const appImageModel: any = db.getAppImageModel();
+      const labelModel: any = db.getLabelModel();
+      let appImage = await appImageModel.findOne({ appId }).session(session);
 
-    if (!appImage) {
-      throw new Error("App not found");
-    }
-
-    if (addLabels && addLabels.length > 0) {
-      const newLabels = [];
-      for (const label of addLabels) {
-        if (!label || !label.content) {
-          continue;
-        }
-        // Check if label exists
-        const existingLabel = await labelModel.findOne({ id: label.id });
-        if (existingLabel) {
-          newLabels.push(existingLabel);
-        } else {
-          // need to create that label
-          const createdLabels = await labelModel.create(label);
-          newLabels.push(createdLabels.id);
-        }
+      if (!appImage) {
+        throw new Error("App not found");
       }
 
-      appImage.labels = appImage.labels || [];
-      appImage.labels.push(...newLabels);
-      await appImage.save();
-    }
+      if (addLabels && addLabels.length > 0) {
+        const newLabels = [];
+        for (const label of addLabels) {
+          if (!label || !label.content) {
+            continue;
+          }
+          // Check if label exists
+          const existingLabel = await labelModel.findOne({ id: label.id }).session(session);
+          if (existingLabel) {
+            newLabels.push(existingLabel.id);
+          } else {
+            // need to create that label
+            const createdLabels = await labelModel.create([label], {session});
+            newLabels.push(createdLabels[0].id);
+          }
+        }
 
-    if (deleteLabels && deleteLabels.length > 0) {
-      const deletedLabels = await labelModel.deleteMany({
-        id: { $in: deleteLabels },
-      });
-      if (appImage.labels && appImage.labels.length > 0) {
-        appImage.labels = appImage.labels.filter(
-          (labelId) => !deleteLabels.includes(labelId.toString())
-        );
+        appImage.labels = appImage.labels || [];
+        appImage.labels.push(...newLabels);
+        await appImage.save({session});
       }
-      await appImage.save();
-    }
 
-    return { updated: true };
+      if (deleteLabels && deleteLabels.length > 0) {
+        const deletedLabels = await labelModel.deleteMany({
+          id: { $in: deleteLabels },
+        }).session(session);
+        if (appImage.labels && appImage.labels.length > 0) {
+          appImage.labels = appImage.labels.filter(
+            (labelId) => !deleteLabels.includes(labelId.toString())
+          );
+        }
+        await appImage.save({session});
+      }
+
+      return { updated: true };
+    });
   } catch (error) {
     console.error("Error modifying labels:", error);
     throw new Error("An error occurred while modifying labels");

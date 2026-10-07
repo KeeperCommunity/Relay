@@ -878,3 +878,86 @@ test('minimized empty legacy maps return valid empty shapes without dropping una
  await assert.rejects(legacy.getAppImage(id,'2.5.16'),/unavailable/);
  assert.equal((await app.findOne({appId:id}).lean()).wallets,undefined,'normalization remains read-only');
 });
+
+
+test('delete backup retains a generation that rejects the original absent token',async()=>{
+ const p=await payload('generation-delete');await service.repairAppBackup(p);
+ await service.deleteAppBackup(p.appId);
+ const cleared=await service.getBackupSnapshot(p.appId);
+ assert.notEqual(cleared.revision,p.expectedRevision);
+ await assert.rejects(service.repairAppBackup(p),service.BackupConflict);
+ assert.deepEqual(plain(cleared.appImage.wallets),{});
+});
+
+test('revisioned A to B to A content never reuses an earlier generation',async()=>{
+ const p=await payload('generation-repair');await service.repairAppBackup(p);
+ const first=await service.getBackupSnapshot(p.appId);
+ await service.repairAppBackup({...p,expectedRevision:first.revision,walletObject:{w:'encrypted-B'}});
+ const second=await service.getBackupSnapshot(p.appId);
+ await service.repairAppBackup({...p,expectedRevision:second.revision});
+ const repeated=await service.getBackupSnapshot(p.appId);
+ assert.deepEqual(plain(repeated.appImage.wallets),plain(first.appImage.wallets));
+ assert.notEqual(repeated.revision,first.revision);
+ await assert.rejects(service.repairAppBackup({...p,expectedRevision:first.revision,walletObject:{w:'stale-ciphertext'}}),service.BackupConflict);
+});
+
+test('incremental A to B to A writes advance the same transactional generation',async()=>{
+ const p=await payload('generation-incremental');await service.repairAppBackup(p);
+ const first=await service.getBackupSnapshot(p.appId);
+ for(const value of ['encrypted-B','encrypted-wallet']) assert.equal((await legacy.updateAppImage(p.appId,null,{w:value})).updated,true);
+ const repeated=await service.getBackupSnapshot(p.appId);
+ assert.deepEqual(plain(repeated.appImage.wallets),plain(first.appImage.wallets));assert.notEqual(repeated.revision,first.revision);
+ await assert.rejects(service.repairAppBackup({...p,expectedRevision:first.revision}),service.BackupConflict);
+});
+
+test('operator-bearing incremental account input cannot read or mutate another backup',async()=>{
+ const p=await payload('incremental-operator-guard');await service.repairAppBackup(p);
+ const original=app.findOne;let reads=0;app.findOne=function(...args){reads++;return original.apply(this,args);};
+ try {
+  for(const appId of [{$ne:null},{$in:[p.appId]},[],null,undefined,'']) assert.equal((await legacy.updateAppImage(appId,null,{w:'unauthorized'})).updated,false);
+  assert.equal(reads,0);
+ } finally {app.findOne=original;}
+ assert.equal((await service.getBackupSnapshot(p.appId)).appImage.wallets.w,'encrypted-wallet');
+});
+
+test('archiving the final active collaborator removes signer lookups without deleting peer ciphertext',async()=>{
+ const p=await collaborativePeers('all-peers-archived');
+ for(const [index,peer] of [p.first,p.second].entries()) {
+  assert.notEqual(await legacy.updateVault(p.vaultId,p.images[index],peer.appId,true,p.signer),false);
+  assert.equal(await map.countDocuments({vaultId:p.vaultId}),index===0?1:0);
+ }
+ assert.equal(await appVault.countDocuments({vaultId:p.vaultId}),2);
+ for(const peer of [p.first,p.second]) assert.equal((await service.getBackupSnapshot(peer.appId)).allVaultImages[0].isArchived,true);
+});
+
+test('malformed repair vault entries and empty fingerprints are request errors with no mutation',async()=>{
+ const p=await payload('repair-vault-input-guard');await service.repairAppBackup(p);
+ const before=await service.getBackupSnapshot(p.appId);
+ for(const value of [null,[],{}, {...vaultRecord('guarded-vault','guarded-key'),signersData:[{signerId:'guarded-key',xfpHash:''}]}]) {
+  await assert.rejects(service.repairAppBackup({...p,expectedRevision:before.revision,vaultObject:{'guarded-vault':value}}),service.InvalidBackupRequest);
+  assert.equal((await service.getBackupSnapshot(p.appId)).revision,before.revision);
+ }
+});
+
+test('legacy label and signer migrations cannot reuse an earlier content generation',async()=>{
+ const p=await payload('generation-legacy-records');p.signersObject={keyA:'encrypted-key'};await service.repairAppBackup(p);
+ await legacy.modifyLabels(p.appId,[{id:'generation-label',content:'synthetic-label-content'}],[]);
+ const first=await service.getBackupSnapshot(p.appId);
+ await legacy.modifyLabels(p.appId,[],['generation-label']);
+ await legacy.modifyLabels(p.appId,[{id:'generation-label',content:'synthetic-label-content'}],[]);
+ assert.notEqual((await service.getBackupSnapshot(p.appId)).revision,first.revision);
+ const before=await service.getBackupSnapshot(p.appId);
+ assert.equal(await legacy.migrateXfp(p.appId,[{oldSignerId:'keyA',newSignerId:'keyB',newSignerDetails:'encrypted-key'}]),true);
+ assert.equal(await legacy.migrateXfp(p.appId,[{oldSignerId:'keyB',newSignerId:'keyA',newSignerDetails:'encrypted-key'}]),true);
+ const repeated=await service.getBackupSnapshot(p.appId);
+ assert.deepEqual(plain(repeated.appImage.signers),plain(before.appImage.signers));assert.notEqual(repeated.revision,before.revision);
+});
+
+
+test('legacy empty-array wallet and signer maps accept incremental encrypted records without replacing saved data',async()=>{
+ const id='legacy-empty-array-maps';await app.create({appId:id,publicId:`public-${id}`,version:'2.5.16',wallets:[],signers:[],nodes:[]});
+ assert.equal((await legacy.updateAppImage(id,null,{w:'synthetic-wallet'},null,null,{key:'synthetic-key'})).updated,true);
+ const snapshot=await service.getBackupSnapshot(id);
+ assert.deepEqual(plain(snapshot.appImage.wallets),{w:'synthetic-wallet'});
+ assert.deepEqual(plain(snapshot.appImage.signers),{key:'synthetic-key'});
+});
