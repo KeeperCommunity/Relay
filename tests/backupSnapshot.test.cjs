@@ -122,6 +122,23 @@ test('archived metadata survives and active signer map survives archive ordering
  p.vaultObject={active:{vaultId:'active',vault:'active-image',isArchived:false,signersData},archived:{vaultId:'archived',vault:'archived-image',isArchived:true,signersData}};
  await service.repairAppBackup(p);assert.equal((await vault.findOne({vaultId:'archived'}).lean()).isArchived,true);assert.equal((await map.findOne({signerId:'fixture-signer'}).lean()).vaultId,'active');
 });
+test('full repair removes a replaced active signer lookup',async()=>{
+ const p=await payload('repair-signer-replacement');
+ p.vaultObject={replacement:{vaultId:'replacement',vault:'first-image',isArchived:false,signersData:[{signerId:'old-repair-signer',xfpHash:'old-repair-hash'}]}};
+ await service.repairAppBackup(p);
+ p.expectedRevision=(await service.getBackupSnapshot(p.appId)).revision;
+ p.vaultObject.replacement={...p.vaultObject.replacement,vault:'second-image',signersData:[{signerId:'new-repair-signer',xfpHash:'new-repair-hash'}]};
+ await service.repairAppBackup(p);
+ assert.equal(await map.countDocuments({signerId:'old-repair-signer'}),0);
+ assert.equal((await map.findOne({signerId:'new-repair-signer'}).lean()).vaultId,'replacement');
+});
+test('legacy full vault save removes a replaced active signer lookup',async()=>{
+ const p=await payload('legacy-signer-replacement');await service.repairAppBackup(p);
+ assert.equal((await legacy.addVaultImage(p.appId,null,'legacy-replacement',null,'first-image',[{signerId:'old-legacy-signer',xfpHash:'old-legacy-hash'}])).updated,true);
+ assert.equal((await legacy.addVaultImage(p.appId,null,'legacy-replacement',null,'second-image',[{signerId:'new-legacy-signer',xfpHash:'new-legacy-hash'}])).updated,true);
+ assert.equal(await map.countDocuments({signerId:'old-legacy-signer'}),0);
+ assert.equal((await map.findOne({signerId:'new-legacy-signer'}).lean()).vaultId,'legacy-replacement');
+});
 test('incomplete referenced records fail closed',async()=>{
  const p=await payload('incomplete');await service.repairAppBackup(p);await app.updateOne({appId:'incomplete'},{$set:{labels:['missing-record']}});
  await assert.rejects(service.getBackupSnapshot('incomplete'),/Incomplete backup/);
@@ -585,6 +602,20 @@ async function collaborativePeers(id) {
  assert.equal((await legacy.addVaultImage(second.appId,null,vaultId,null,images[1],signer)).updated,true);
  return {first,second,vaultId,signer,seeds,data,images};
 }
+
+test('archiving or unlinking one participant prunes only its unique signer lookups',async()=>{
+ for (const operation of ['archive','unlink']) {
+  const p=await collaborativePeers(`scoped-signers-${operation}`);
+  const ownSigner=signerData(`scoped-${operation}-only-key`)[0];
+  assert.equal((await legacy.addVaultImage(p.first.appId,null,p.vaultId,null,p.images[0],[ownSigner])).updated,true);
+  assert.equal((await map.findOne({signerId:p.signer[0].signerId}).lean()).vaultId,p.vaultId,'peer signer remains mapped');
+  assert.equal((await map.findOne({signerId:ownSigner.signerId}).lean()).vaultId,p.vaultId);
+  if (operation==='archive') assert.notEqual(await legacy.updateVault(p.vaultId,p.images[0],p.first.appId,true),false);
+  else assert.equal((await legacy.deleteVaults(p.first.appId,[p.vaultId])).updated,true);
+  assert.equal(await map.countDocuments({signerId:ownSigner.signerId}),0);
+  assert.equal((await map.findOne({signerId:p.signer[0].signerId}).lean()).vaultId,p.vaultId);
+ }
+});
 
 test('second collaborative participant stores and restores independently encrypted canonical wallet',async()=>{
  const p=await collaborativePeers('scoped-collaborative');

@@ -211,14 +211,36 @@ async function clearVaultMapsIfUnshared(appId: string, vaultId: string, session:
   await db.getVaultMapModel().deleteMany({vaultId}).session(session);
 }
 
+// A removed signer must stop resolving to this vault unless another active
+// participant still has that signer in its own encrypted vault image.
+async function pruneRemovedVaultMaps(vaultId: string, removedIds: string[], session: mongoose.ClientSession, excludedAppId?: string) {
+  const candidates = new Set(removedIds.filter(id => typeof id === "string" && id));
+  if (!candidates.size) return;
+  const participants = await db.getAppImageModel().find({vaults:vaultId}).session(session).lean() as any[];
+  for (const participant of participants) {
+    if (participant.appId === excludedAppId) continue;
+    const images = await accountVaultImages(participant.appId, [vaultId], session);
+    for (const image of images.allVaultImages) {
+      if (!image.isArchived && Array.isArray(image.signerIds)) {
+        for (const id of image.signerIds) candidates.delete(id);
+      }
+    }
+  }
+  if (candidates.size) {
+    await db.getVaultMapModel().deleteMany({vaultId, signerId:{$in:Array.from(candidates)}}).session(session);
+  }
+}
+
 async function removeAccountVaults(appId: string, vaultIds: string[], session: mongoose.ClientSession) {
   for (const vaultId of Array.from(new Set(vaultIds))) {
+    const owned = (await accountVaultImages(appId, [vaultId], session)).allVaultImages[0];
     const legacy = await db.getVaultImageModel().findOne({vaultId}).session(session).lean();
     // A real common-document write makes simultaneous participant unlinks retry
     // before deciding whether the final global lookup/image can be removed.
     if (legacy) await db.getVaultImageModel().updateOne({vaultId}, {$inc:{__v:1}}, {session});
     const other = await db.getAppImageModel().findOne({appId:{$ne:appId},vaults:vaultId}).session(session).lean();
     await clearVaultMapsIfUnshared(appId, vaultId, session);
+    await pruneRemovedVaultMaps(vaultId, owned?.signerIds || [], session, appId);
     if (!other) {
       await db.getVaultImageModel().deleteMany({vaultId}).session(session);
     }
@@ -251,6 +273,7 @@ async function archiveBackupVaultInSession(vaultId: string, session: mongoose.Cl
   if (!existing) return false;
   await writeVaultImage(appId, vaultId, {...vaultFields(existing),isArchived:true}, session);
   await clearVaultMapsIfUnshared(appId, vaultId, session);
+  await pruneRemovedVaultMaps(vaultId, existing.signerIds || [], session);
   await advanceBackupGeneration(appId, session);
   return true;
 }
@@ -294,6 +317,8 @@ export async function saveBackupVault(data: any) {
     }, session);
     if (isArchived) await clearVaultMapsIfUnshared(appId, data.vaultId, session);
     else if (signersData !== undefined) await writeVaultMaps(signersData, data.vaultId, session);
+    const retainedIds = isArchived ? [] : signersData === undefined ? (existing?.signerIds || []) : signersData.map(s => s.signerId);
+    await pruneRemovedVaultMaps(data.vaultId, (existing?.signerIds || []).filter(id => !retainedIds.includes(id)), session);
     await db.getAppImageModel().updateOne({ appId }, { $addToSet: { vaults: data.vaultId } }, { session });
     await advanceBackupGeneration(appId, session);
     return { updated: true, error: "" };
@@ -410,6 +435,11 @@ async function writeBackup(data: any, legacy: boolean) {
       if (!v.isArchived) for (const signer of v.signersData) {
         await db.getVaultMapModel().updateOne({ signerId:signer.signerId }, { $set:{ ...signer,vaultId } }, {upsert:true,session});
       }
+    }
+    for (const [vaultId,v] of Object.entries(data.vaultObject) as [string,any][]) {
+      const previous = current.allVaultImages.find(image => image.vaultId === vaultId);
+      const retainedIds = v.isArchived ? [] : v.signersData.map(s => s.signerId);
+      await pruneRemovedVaultMaps(vaultId, (previous?.signerIds || []).filter(id => !retainedIds.includes(id)), session);
     }
     for (const label of data.labels) {
       const otherOwner = await db.getAppImageModel().findOne({
