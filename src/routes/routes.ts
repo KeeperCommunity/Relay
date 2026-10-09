@@ -503,14 +503,20 @@ export default class Routes {
       if (!req.body.appId) {
         return res.status(400).json({ err: "Input param missing - app's id" });
       }
+      // Older mobile clients send walletObject and signersObjects.
+      const hasField = (name: string) => Object.prototype.hasOwnProperty.call(req.body, name);
+      if ((hasField("walletsObject") && hasField("walletObject")) ||
+          (hasField("signersObject") && hasField("signersObjects"))) {
+        return res.status(400).json({ updated: false, error: "Conflicting backup record fields" });
+      }
       try {
         const result = await bhr.updateAppImage(
           req.body.appId,
           req.body.publicId,
-          req.body.walletsObject,
+          hasField("walletsObject") ? req.body.walletsObject : req.body.walletObject,
           req.body.subscription,
           req.body.version,
-          req.body.signersObject,
+          hasField("signersObject") ? req.body.signersObject : req.body.signersObjects,
           req.body.nodes,
           req.body.replaceNodes === true,
         );

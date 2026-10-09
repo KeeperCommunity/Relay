@@ -108,3 +108,58 @@ for (const flag of [true, 'true']) test(`route requires a boolean replacement re
   assert.equal(status, 200); assert.equal(body.updated, true);
   assert.deepEqual((await stored(id)).nodes, flag === true ? [] : ['encrypted-node']);
 });
+
+async function postUpdate(body) {
+  let status, result;
+  const response = { status(code) { status = code; return this; }, json(value) { result = value; return this; } };
+  await routeHandler()({ body }, response);
+  return { status, result };
+}
+
+test('v1.1.9 walletObject route payload persists an incremental encrypted wallet', async () => {
+  const id = 'legacy-wallet-field'; await seed(id);
+  const response = await postUpdate({ appId: id, walletObject: { added: 'legacy-wallet-ciphertext' }, nodes: [] });
+  assert.equal(response.status, 200); assert.equal(response.result.updated, true);
+  const record = await stored(id);
+  assert.equal(record.wallets.added, 'legacy-wallet-ciphertext');
+  assert.equal(record.wallets.existing, 'encrypted-wallet');
+  assert.deepEqual(record.nodes, ['encrypted-node']);
+});
+
+test('v1.1.11–v2.1.0 walletObject and signersObjects payload persists both incremental maps', async () => {
+  const id = 'legacy-wallet-signer-fields'; await seed(id);
+  const response = await postUpdate({ appId: id,
+    walletObject: { added: 'legacy-wallet-ciphertext' },
+    signersObjects: { added: 'legacy-signer-ciphertext' } });
+  assert.equal(response.status, 200); assert.equal(response.result.updated, true);
+  const record = await stored(id);
+  assert.equal(record.wallets.added, 'legacy-wallet-ciphertext');
+  assert.equal(record.signers.added, 'legacy-signer-ciphertext');
+  assert.equal(record.wallets.existing, 'encrypted-wallet');
+  assert.equal(record.signers.existing, 'encrypted-signer');
+});
+
+test('current route field names continue to persist encrypted wallet and signer records', async () => {
+  const id = 'current-wallet-signer-fields'; await seed(id);
+  const response = await postUpdate({ appId: id,
+    walletsObject: { added: 'current-wallet-ciphertext' },
+    signersObject: { added: 'current-signer-ciphertext' } });
+  assert.equal(response.status, 200); assert.equal(response.result.updated, true);
+  const record = await stored(id);
+  assert.equal(record.wallets.added, 'current-wallet-ciphertext');
+  assert.equal(record.signers.added, 'current-signer-ciphertext');
+});
+
+for (const [canonical, legacy] of [['walletsObject', 'walletObject'], ['signersObject', 'signersObjects']]) {
+  test(`ambiguous ${canonical}/${legacy} route fields reject before mutating the backup`, async () => {
+    const id = `conflicting-${canonical}`; await seed(id);
+    const before = await stored(id);
+    const response = await postUpdate({ appId: id,
+      [canonical]: { added: 'canonical-ciphertext' }, [legacy]: { added: 'legacy-ciphertext' } });
+    assert.equal(response.status, 400); assert.equal(response.result.updated, false);
+    const after = await stored(id);
+    assert.deepEqual(after.wallets, before.wallets);
+    assert.deepEqual(after.signers, before.signers);
+    assert.equal(after.backupGeneration, before.backupGeneration);
+  });
+}
