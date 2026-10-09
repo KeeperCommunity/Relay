@@ -35,4 +35,21 @@ jobs:
       - name: Audit runtime dependencies
         run: yarn audit --groups dependencies
       - run: yarn test --runInBand
+      - name: Start disposable backup replica set
+        run: |
+          docker run -d --name keeper-backup-mongo -p 127.0.0.1:27028:27017 \
+            mongo:7.0@sha256:9854f7139445d766a9523571d6f047530c45547460ffcf8259eb2bf4264632ca \
+            --replSet keeperQA --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec keeper-backup-mongo mongosh --quiet --eval 'try { rs.status(); } catch (e) { if (e.code !== 94) throw e; rs.initiate({_id: "keeperQA", members: [{_id: 0, host: "127.0.0.1:27017"}]}); } quit(db.hello().isWritablePrimary ? 0 : 1)'; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec keeper-backup-mongo mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'
+      - name: Backup revision and account-isolation regression tests
+        run: yarn test:backup
+      - name: Remove disposable backup replica set
+        if: always()
+        run: docker rm -f keeper-backup-mongo || true
       # yarn test compiles TypeScript before Jest. SonarCloud is deferred.

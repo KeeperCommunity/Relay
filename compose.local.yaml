@@ -1,6 +1,12 @@
 services:
   mongo:
     image: mongo:7.0@sha256:9854f7139445d766a9523571d6f047530c45547460ffcf8259eb2bf4264632ca
+    command: [mongod, --replSet, keeper-local, --bind_ip_all]
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --eval, "try { rs.status(); } catch (e) { if (e.code !== 94) throw e; rs.initiate({_id: 'keeper-local', members: [{_id: 0, host: 'mongo:27017'}]}); } quit(db.hello().isWritablePrimary ? 0 : 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     volumes:
       - relay-local-mongo:/data/db
     networks:
@@ -10,12 +16,13 @@ services:
       context: .
       dockerfile: Dockerfile.local
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
     environment:
       LOCAL_DEV: "true"
       ENVIRONMENT: DEVELOPMENT
       BITCOIN_NETWORK: TESTNET
-      DATABASE_URL: mongodb://mongo:27017/keeper-relay-local
+      DATABASE_URL: mongodb://mongo:27017/keeper-relay-local?replicaSet=keeper-local
       PORT: "3000"
       WS_PORT: "4002"
     ports:

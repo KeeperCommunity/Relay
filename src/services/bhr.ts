@@ -1,3 +1,14 @@
+import {
+  backupLegacyApp,
+  deleteAppBackup,
+  deleteBackupEntities,
+  saveBackupVault,
+  createBackupVaultMap,
+  archiveBackupVault,
+  deleteBackupVaults,
+  getBackupSnapshot,
+  withBackupMutation,
+} from "./backupSnapshot";
 import { AppImage, AppSubscription } from "../interface";
 import db from "../db";
 import { getAppSubscriptionDetails } from "./app";
@@ -10,95 +21,59 @@ export const updateAppImage = async (
   subscription,
   version,
   signersObject,
-  nodes
+  nodes,
+  replaceNodes = false
 ): Promise<{ updated: boolean; error?: string }> => {
+  if (typeof appId !== "string" || !appId) return {updated:false,error:"Invalid backup account"};
   const appImageModel: any = db.getAppImageModel();
-  const [appImage] = await appImageModel.find({ appId });
   try {
-    //new App Image
-    if (!appImage) {
-      const appImageInstance = new appImageModel({
-        appId,
-        publicId,
-        wallets: walletObject,
-        subscription,
-        version,
-        nodes,
-      });
-      await appImageInstance.save();
-      return { updated: true, error: "" };
-    }
-    //update App Image
-    else {
-      if (publicId) appImage.public = publicId;
-      if (subscription) appImage.subscription = subscription;
-      if (version) appImage.version = version;
-      if (nodes.length) appImage.nodes = nodes;
-      if (walletObject) {
-        //wallets condition check based on subscription beofre adding
+    return await withBackupMutation(appId, async session => {
+      if (replaceNodes === true && (!Array.isArray(nodes) || nodes.some(node => typeof node !== "string" || !node))) {
+        return { updated: false, error: "Invalid encrypted nodes" };
+      }
+      const appImage = await appImageModel.findOne({ appId }).session(session);
+      if (appImage && walletObject) {
         const appSubscription = await getAppSubscriptionDetails(appId);
-        if (appSubscription) {
-          const isValid = isAllowedToUpdate(
-            appSubscription,
-            appImage,
-            walletObject
-          );
-          if (isValid) {
-            const updatedWallets = {
-              ...appImage.wallets,
-              ...walletObject,
-            };
-            appImage.wallets = updatedWallets;
-          } else {
-            return {
-              updated: false,
-              error:
-                "Your current subscription plan does not allow to add more wallets",
-            };
-          }
-        } else {
-          // todo add this return { updated: false, error: "App not found" };
-          const updatedWallets = {
-            ...appImage.wallets,
-            ...walletObject,
-          };
-          appImage.wallets = updatedWallets;
-          const updatedImage = await appImage.save((err) => {
-            if (err) {
-              console.log(err);
-              throw new Error(`Error occured while saving to database: ${err}`);
-            }
-          });
-          return { updated: true, error: "" };
+        if (appSubscription && !isAllowedToUpdate(appSubscription, appImage, walletObject)) {
+          return { updated: false, error: "Your current subscription plan does not allow to add more wallets" };
         }
       }
-      if (signersObject) {
-        const updatedSigners = {
-          ...appImage.signers,
-          ...signersObject,
-        };
-        appImage.signers = updatedSigners;
-        const updatedImage = await appImage.save((err) => {
-          if (err) {
-            console.log(err);
-            throw new Error(`Error occured while saving to database: ${err}`);
+      // Set individual records atomically. A delayed incremental save must not
+      // replace wallets/signers added by a concurrent repair or another device.
+      const changes: any = {};
+      if (publicId) changes.publicId = publicId;
+      if (subscription) changes.subscription = subscription;
+      if (version) changes.version = version;
+      // Legacy clients attach [] to unrelated wallet/key updates. Only explicit
+      // node replacement may clear the list; preserve legacy nonempty updates.
+      if (Array.isArray(nodes) && (replaceNodes === true || nodes.length)) changes.nodes = nodes;
+      for (const [kind, records] of [["wallets", walletObject], ["signers", signersObject]] as any[]) {
+        for (const [id, value] of Object.entries(records || {})) {
+          if (!id || /[.$]/.test(id) || ["__proto__", "constructor", "prototype"].includes(id)) {
+            return { updated:false, error:"Invalid backup record ID" };
           }
-        });
-        return { updated: true, error: "" };
-      }
-      await appImage.save((err) => {
-        if (err) {
-          console.log(err);
-          return {
-            updated: false,
-            error: `Error occured while saving to database: ${err}`,
-          };
+          changes[`${kind}.${id}`] = value;
         }
-      });
-      return { updated: true, error: "" };
-    }
-  } catch (err) {
-    return { updated: false, error: `${err}` };
+      }
+      const defaults: any = { appId };
+      if (!walletObject || !Object.keys(walletObject).length) defaults.wallets = {};
+      if (!signersObject || !Object.keys(signersObject).length) defaults.signers = {};
+      if (!changes.nodes) defaults.nodes = [];
+      if (!appImage && (!publicId || !version)) return { updated:false, error:"Backup account missing" };
+      // Old createNewApp records used [] for empty maps. Convert only empty
+      // containers in this transaction before setting a per-record dotted path.
+      const emptyLegacyMaps: any = {};
+      for (const kind of ["wallets", "signers"]) {
+        if (Array.isArray(appImage?.[kind]) && appImage[kind].length === 0) emptyLegacyMaps[kind] = {};
+      }
+      if (Object.keys(emptyLegacyMaps).length) await appImageModel.updateOne({appId}, {$set:emptyLegacyMaps}, {session});
+      if (Object.keys(changes).length) {
+        await appImageModel.updateOne({ appId }, { $set:changes, $setOnInsert:defaults }, { upsert:true,runValidators:true,session });
+      }
+      return { updated:true,error:"" };
+    });
+  } catch {
+    return { updated:false,error:"Backup update failed" };
   }
 };
 
@@ -107,91 +82,18 @@ export const deleteAppImageEntity = async (
   wallets,
   signers
 ): Promise<{ updated: boolean; error?: string }> => {
-  const appImageModel: any = db.getAppImageModel();
-  const [appImage] = await appImageModel.find({ appId });
   try {
-    if (!appImage) {
-      console.log("Something Went Wrong, could not find the app image");
-      return { updated: false, error: "No app image" };
-    } else {
-      if (signers?.length > 0) {
-        let appImageSigners = { ...appImage.signers };
-        console.log({ appImageSigners });
-        for (const signerId of signers) {
-          if (appImageSigners.hasOwnProperty(signerId)) {
-            delete appImageSigners[signerId];
-          }
-        }
-        console.log({ appImageSigners });
-        appImage.signers = appImageSigners;
-      }
-      if (wallets?.length > 0) {
-        let appImageWallets = { ...appImage.wallets };
-        for (const walletId of wallets) {
-          if (appImageWallets.hasOwnProperty(walletId)) {
-            delete appImageWallets[walletId];
-          }
-        }
-        appImage.wallets = appImageWallets;
-      }
-      await appImage.save((err) => {
-        if (err) {
-          console.log(err);
-          return {
-            updated: false,
-            error: `Error occured while saving to database: ${err}`,
-          };
-        } else {
-          console.log("update");
-          return { updated: true, error: "" };
-        }
-      });
-      return { updated: true, error: "" };
-    }
-  } catch (err) {
-    console.log("Error", err);
-    return { updated: false, error: `${err}` };
+    return await deleteBackupEntities(appId, wallets, signers);
+  } catch {
+    return { updated: false, error: "Backup deletion failed" };
   }
 };
 
 export const deleteVaults = async (appId, vaults) => {
   try {
-    const vaultImageModel: any = db.getVaultImageModel();
-    const appImageModel: any = db.getAppImageModel();
-    const [appImage] = await appImageModel.find({ appId });
-
-    if (appImage) {
-      console.log({ old: appImage.vaults });
-      const updatedAppImageVaults = appImage.vaults.filter(
-        (vaultId) => !vaults.includes(vaultId)
-      );
-      appImage.vaults = updatedAppImageVaults;
-
-      await appImage.save((err) => {
-        if (err) {
-          console.log(err);
-          return {
-            updated: false,
-            error: `Error occured while saving to database: ${err}`,
-          };
-        }
-      });
-      for (const vaultId of vaults) {
-        vaultImageModel
-          .findOneAndDelete({ vaultId })
-          .then((deletedEntity) => {
-            console.log("Deleted Vault entity");
-          })
-          .catch((error) => {
-            console.error("Error deleting entity:", error);
-          });
-      }
-
-      return { updated: true };
-    }
-  } catch (err) {
-    console.log(err);
-    return { updated: false, error: `${err}` };
+    return await deleteBackupVaults(appId, vaults);
+  } catch {
+    return { updated: false, error: "Vault backup deletion failed" };
   }
 };
 
@@ -223,25 +125,7 @@ const isCreatingNewWallet = (
   return isCreatingNewWallet;
 };
 
-export const createVaultMap = async (signersData: any[], vaultId) => {
-  const vaultImageMapModel: any = db.getVaultMapModel();
-  for (let index in signersData) {
-    const [vaultMap] = await vaultImageMapModel.find({
-      signerId: signersData[index].signerId,
-    });
-    if (!vaultMap) {
-      const vaultMapInstance = new vaultImageMapModel({
-        signerId: signersData[index].signerId,
-        xfpHash: signersData[index].xfpHash,
-        vaultId,
-      });
-      vaultMapInstance.save();
-    } else {
-      vaultMap.vaultId = vaultId;
-      vaultMap.save();
-    }
-  }
-};
+export const createVaultMap = createBackupVaultMap;
 
 export const addVaultImage = async (
   appId,
@@ -250,105 +134,56 @@ export const addVaultImage = async (
   scheme,
   vault,
   signersData,
-  subscription
+  subscription,
+  archiveVaultId?,
+  isArchived?
 ) => {
   try {
-    const vaultImageModel: any = db.getVaultImageModel();
-    const [vaultImage] = await vaultImageModel.find({ vaultId }); // old vault with same signer may exsist
-    if (!vaultImage) {
-      // update the appImage's vault filed with new vaultId
-      const appImageModel: any = db.getAppImageModel();
-      const [appImage] = await appImageModel.find({ appId });
-      const updatedVaults = [...appImage.vaults, vaultId];
-      appImage.vaults = updatedVaults;
-      await appImage.save((err) => {
-        if (err) {
-          console.log(err);
-          throw new Error(`Error occured while saving to database: ${err}`);
-        }
-      });
-
-      //creating new vault image and adding the map
-      const signerIds = signersData.map((signer) => signer.signerId);
-      const vaultImageInstance = new vaultImageModel({
-        appId,
-        vaultShellId,
-        vaultId,
-        signerIds,
-        scheme,
-        vault,
-        subscription,
-      });
-      vaultImageInstance.save();
-      createVaultMap(signersData, vaultId);
-    } else {
-      if (appId) {
-        vaultImage.appId = appId;
-        //updated link of vault for new appId
-        const appImageModel: any = db.getAppImageModel();
-        const [appImage] = await appImageModel.find({ appId });
-        const updatedVaults = [...appImage.vaults, vaultId];
-        appImage.vaults = updatedVaults;
-        await appImage.save((err) => {
-          if (err) {
-            console.log(err);
-            throw new Error(`Error occured while saving to database: ${err}`);
-          }
-        });
-      }
-      if (vaultShellId) vaultImage.vaultShellId = vaultShellId;
-      if (signersData) {
-        const signerIds = signersData.map((signer) => signer.signerId);
-        vaultImage.signerIds = signerIds;
-        createVaultMap(signersData, vaultId);
-      }
-      if (scheme) vaultImage.scheme = scheme;
-      if (vault) vaultImage.vault = vault;
-      if (subscription) vaultImage.subscription = subscription;
-      vaultImage.isArchived = false;
-      vaultImage.save();
-    }
-
-    return { updated: true, error: "" };
-  } catch (err) {
-    console.log(err);
-    return { updated: false, error: `${err}` };
+    return await saveBackupVault({
+      appId,
+      vaultShellId,
+      vaultId,
+      scheme,
+      vault,
+      signersData,
+      subscription,
+      archiveVaultId,
+      isArchived,
+    });
+  } catch {
+    return { updated: false, error: "Vault backup update failed" };
   }
 };
 
 export const archiveVault = async (vaultId) => {
   try {
-    const vaultImageModel: any = db.getVaultImageModel();
-    const [vaultImage] = await vaultImageModel.find({ vaultId });
-    if (vaultImage) {
-      vaultImage.isArchived = true;
-      vaultImage.save();
-    }
-    const vaultImageMapModel: any = db.getVaultMapModel();
-    await vaultImageMapModel.deleteMany({ vaultId });
-    return true;
-  } catch (err) {
-    console.log(err);
+    return await archiveBackupVault(vaultId);
+  } catch {
     return false;
   }
 };
 
-export const updateVault = async (vaultId, vault) => {
+export const updateVault = async (vaultId, vault, appId?, isArchived?, signersData?) => {
   try {
-    const vaultImageModel: any = db.getVaultImageModel();
-    const [vaultImage] = await vaultImageModel.find({ vaultId });
-    if (vaultImage) {
-      vaultImage.isArchived = false;
-      vaultImage.vault = vault;
-      vaultImage.save();
-    }
-    return {};
-  } catch (err) {
-    console.log(err);
+    const result = await saveBackupVault({
+      appId,
+      vaultId,
+      vault,
+      isArchived,
+      signersData,
+      isUpdate: true,
+    });
+    return result?.updated ? {} : false;
+  } catch {
+    return false;
   }
 };
 
+const isLookupIdentifier = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
 export const getSignerIdInfo = async (signerId) => {
+  if (!isLookupIdentifier(signerId)) return false;
   const vaultMapModel: any = db.getVaultMapModel();
   const [vaultMap] = await vaultMapModel.find({ signerId });
   if (!vaultMap) {
@@ -360,6 +195,12 @@ export const getSignerIdInfo = async (signerId) => {
 };
 
 export const getVaultMetaData = async (xfpHash, signerId) => {
+  if (
+    !isLookupIdentifier(xfpHash) ||
+    (signerId !== undefined && !isLookupIdentifier(signerId))
+  ) {
+    return { error: "No Vault for this signer Id" };
+  }
   const vaultMapModel: any = db.getVaultMapModel();
   let vault;
   if (signerId) {
@@ -383,6 +224,7 @@ export const getVaultMetaData = async (xfpHash, signerId) => {
 };
 
 export const getVaultImage = async (vaultId) => {
+  if (!isLookupIdentifier(vaultId)) return;
   const vaultImageModel: any = db.getVaultImageModel();
   const [vaultImage] = await vaultImageModel.find({ vaultId });
   if (!vaultImage) {
@@ -394,40 +236,29 @@ export const getVaultImage = async (vaultId) => {
 };
 
 export const getAppImage = async (appId, appversion) => {
-  const appImageModel: any = db.getAppImageModel();
-  const labelModel: any = db.getLabelModel();
-  let [appImage] = await appImageModel.find({ appId });
-  if (!appImage) {
-    appImage = {
-      labels: [],
-      vaults: [],
-      nodes: [],
-      appId,
-      wallets: {},
-      version: appversion,
-      signers: {},
-    };
-  }
+  const snapshot = await getBackupSnapshot(appId);
+  if (snapshot.unavailableVaultIds.length) throw new Error("Recovery data unavailable");
+  const appImage = snapshot.exists
+    ? snapshot.appImage
+    : { ...snapshot.appImage, version: appversion };
   let vaultImage;
-  let allVaultImages = [];
-  if (appImage.vaults.length > 0) {
-    for (const i in appImage.vaults) {
-      const { isVault } = await vaultCheck(appImage.vaults[i]);
-      const image = await getVaultImage(appImage.vaults[i]);
-      if (isVault) {
-        vaultImage = image;
-      }
-      allVaultImages.push(image);
-    }
+  const vaultIds = appImage.vaults || [];
+  const availableVaultImages = snapshot.allVaultImages;
+  const vaultsById = new Map<string, any>();
+  for (const image of availableVaultImages) vaultsById.set(image.vaultId, image);
+  const allVaultImages = [];
+  for (const vaultId of vaultIds) {
+    const image = vaultsById.get(vaultId);
+    if (!image) throw new Error("Recovery data unavailable");
+    if (!image.isArchived) vaultImage = image;
+    allVaultImages.push(image);
   }
   const subscription = await getAppSubscriptionDetails(appId, true);
   const plan = getPlans().find((plan) => plan.level === subscription.level);
-  const labelIds = appImage.labels;
-  const labels = await labelModel.find({ id: labelIds });
   return {
     appImage,
     vaultImage,
-    labels,
+    labels: snapshot.labels,
     subscription: {
       level: subscription.level,
       name: plan.name,
@@ -442,6 +273,7 @@ export const getAppImage = async (appId, appversion) => {
 };
 
 export const vaultCheck = async (vaultId) => {
+  if (!isLookupIdentifier(vaultId)) return { isVault: false };
   try {
     const vaultImageModel: any = db.getVaultImageModel();
     const [vaultImage] = await vaultImageModel.find({ vaultId });
@@ -478,22 +310,24 @@ export const migrateXfp = async (
   signerChanges: SignerChange[]
 ) => {
   try {
-    const appImageModel: any = db.getAppImageModel();
-    const [appImage] = await appImageModel.find({ appId });
-    let signersObject = { ...appImage.signers };
-    if (appImage) {
-      for (const change of signerChanges) {
-        if (signersObject[change.oldSignerId] !== undefined) {
-          delete signersObject[change.oldSignerId];
+    return await withBackupMutation(appId, async session => {
+      const appImageModel: any = db.getAppImageModel();
+      const [appImage] = await appImageModel.find({ appId }).session(session);
+      let signersObject = { ...appImage?.signers };
+      if (appImage) {
+        for (const change of signerChanges) {
+          if (signersObject[change.oldSignerId] !== undefined) {
+            delete signersObject[change.oldSignerId];
+          }
+          signersObject[change.newSignerId] = change.newSignerDetails;
         }
-        signersObject[change.newSignerId] = change.newSignerDetails;
+        appImage.signers = signersObject;
+        await appImage.save({session});
+        return true;
+      } else {
+        return false;
       }
-      appImage.signers = signersObject;
-      await appImage.save();
-      return true;
-    } else {
-      return false;
-    }
+    });
   } catch (err) {
     console.log(err);
     return false;
@@ -502,239 +336,58 @@ export const migrateXfp = async (
 
 export const modifyLabels = async (appId, addLabels, deleteLabels) => {
   try {
-    const appImageModel: any = db.getAppImageModel();
-    const labelModel: any = db.getLabelModel();
-    let appImage = await appImageModel.findOne({ appId });
+    return await withBackupMutation(appId, async session => {
+      const appImageModel: any = db.getAppImageModel();
+      const labelModel: any = db.getLabelModel();
+      let appImage = await appImageModel.findOne({ appId }).session(session);
 
-    if (!appImage) {
-      throw new Error("App not found");
-    }
-
-    if (addLabels && addLabels.length > 0) {
-      const newLabels = [];
-      for (const label of addLabels) {
-        if (!label || !label.content) {
-          continue;
-        }
-        // Check if label exists
-        const existingLabel = await labelModel.findOne({ id: label.id });
-        if (existingLabel) {
-          newLabels.push(existingLabel);
-        } else {
-          // need to create that label
-          const createdLabels = await labelModel.create(label);
-          newLabels.push(createdLabels.id);
-        }
+      if (!appImage) {
+        throw new Error("App not found");
       }
 
-      appImage.labels = appImage.labels || [];
-      appImage.labels.push(...newLabels);
-      await appImage.save();
-    }
+      if (addLabels && addLabels.length > 0) {
+        const newLabels = [];
+        for (const label of addLabels) {
+          if (!label || !label.content) {
+            continue;
+          }
+          // Check if label exists
+          const existingLabel = await labelModel.findOne({ id: label.id }).session(session);
+          if (existingLabel) {
+            newLabels.push(existingLabel.id);
+          } else {
+            // need to create that label
+            const createdLabels = await labelModel.create([label], {session});
+            newLabels.push(createdLabels[0].id);
+          }
+        }
 
-    if (deleteLabels && deleteLabels.length > 0) {
-      const deletedLabels = await labelModel.deleteMany({
-        id: { $in: deleteLabels },
-      });
-      if (appImage.labels && appImage.labels.length > 0) {
-        appImage.labels = appImage.labels.filter(
-          (labelId) => !deleteLabels.includes(labelId.toString())
-        );
+        appImage.labels = appImage.labels || [];
+        appImage.labels.push(...newLabels);
+        await appImage.save({session});
       }
-      await appImage.save();
-    }
 
-    return { updated: true };
+      if (deleteLabels && deleteLabels.length > 0) {
+        const deletedLabels = await labelModel.deleteMany({
+          id: { $in: deleteLabels },
+        }).session(session);
+        if (appImage.labels && appImage.labels.length > 0) {
+          appImage.labels = appImage.labels.filter(
+            (labelId) => !deleteLabels.includes(labelId.toString())
+          );
+        }
+        await appImage.save({session});
+      }
+
+      return { updated: true };
+    });
   } catch (error) {
     console.error("Error modifying labels:", error);
     throw new Error("An error occurred while modifying labels");
   }
 };
 
-export const backupAllSignersAndVaults = async (data) => {
-  const {
-    appId,
-    publicId,
-    walletObject,
-    signersObject,
-    vaultObject,
-    subscription,
-    version,
-    nodes,
-    labels,
-  } = data;
-  const appImageModel: any = db.getAppImageModel();
-  let [appImage] = await appImageModel.find({ appId });
-  const labelModel: any = db.getLabelModel();
-  const vaultImageModel: any = db.getVaultImageModel();
-  const vaultsList = [];
-  let isNewAppImage = false;
-  try {
-    if (!appImage) {
-      isNewAppImage = true;
-      appImage = {};
-    }
+// Keep the legacy route, but never perform an unversioned destructive save.
+export const backupAllSignersAndVaults = backupLegacyApp;
 
-    if (publicId) appImage.public = publicId;
-    if (subscription) appImage.subscription = subscription;
-    if (version) appImage.version = version;
-    if (walletObject) appImage.wallets = walletObject;
-    if (signersObject) appImage.signers = signersObject;
-    if (nodes) appImage.nodes = nodes;
-
-    for (let vaultId in vaultObject) {
-      const { vaultShellId, scheme, signersData, vault } = vaultObject[vaultId];
-      const [vaultImage] = await vaultImageModel.find({ vaultId }); // old vault with same signer may exist
-      if (!vaultImage) {
-        vaultsList.push(vaultId);
-        //creating new vault image and adding the ma
-        const signerIds = vaultObject[vaultId].signersData.map(
-          (signer) => signer.signerId
-        );
-        const vaultImageInstance = new vaultImageModel({
-          appId,
-          vaultShellId,
-          vaultId,
-          signerIds,
-          scheme,
-          vault,
-          subscription,
-        });
-        vaultImageInstance.save();
-        createVaultMap(signersData, vaultId);
-      } else {
-        if (appId) {
-          vaultImage.appId = appId;
-          vaultsList.push(vaultId);
-        }
-        if (vaultShellId) vaultImage.vaultShellId = vaultShellId;
-        if (signersData) {
-          const signerIds = signersData.map((signer) => signer.signerId);
-          vaultImage.signerIds = signerIds;
-          createVaultMap(signersData, vaultId);
-        }
-        if (scheme) vaultImage.scheme = scheme;
-        if (vault) vaultImage.vault = vault;
-        if (subscription) vaultImage.subscription = subscription;
-        vaultImage.isArchived = false;
-        vaultImage.save();
-      }
-    }
-
-    const deletedVaults = appImage?.vaults?.filter(
-      (vault) => !vaultsList.includes(vault)
-    );
-
-    if (deletedVaults?.length > 0) {
-      for (const vaultId of deletedVaults) {
-        await vaultImageModel
-          .findOneAndDelete({ vaultId })
-          .then((deletedEntity) => {
-            console.log("Deleted Vault entity");
-          })
-          .catch((error) => {
-            console.error("Error deleting entity:", error);
-          });
-      }
-    }
-    appImage.vaults = vaultsList;
-
-    const newLabels = labels.filter(
-      (obj) => !appImage?.labels?.includes(obj.id)
-    );
-
-    const deletedLabels = appImage?.labels?.filter(
-      (labelId) => !labels.some((appItem) => appItem.id === labelId)
-    );
-
-    if (newLabels?.length > 0) {
-      const finalLabels = [];
-      for (const label of newLabels) {
-        if (!label || !label.content) {
-          continue;
-        }
-        // Check if label exists
-        const existingLabel = await labelModel.findOne({ id: label.id });
-        if (existingLabel) {
-          finalLabels.push(existingLabel.id);
-        } else {
-          // need to create that label
-          const createdLabels = await labelModel.create(label);
-          finalLabels.push(createdLabels.id);
-        }
-      }
-      appImage.labels = appImage?.labels || [];
-      appImage.labels.push(...finalLabels);
-    }
-
-    if (deletedLabels?.length > 0) {
-      await labelModel.deleteMany({
-        id: { $in: deletedLabels },
-      });
-      appImage.labels = appImage?.labels?.filter(
-        (labelId) => !deletedLabels.includes(labelId.toString())
-      );
-    }
-
-    if (isNewAppImage) {
-      appImage = new appImageModel({
-        ...appImage,
-        publicId: appImage.public,
-        appId,
-      });
-    }
-
-    await appImage.save((err) => {
-      if (err) {
-        console.log(err);
-        return {
-          updated: false,
-          error: `Error occurred while saving to database: ${err}`,
-        };
-      }
-    });
-    return { updated: true, error: "" };
-  } catch (err) {
-    console.log("🚀 ~ backupAllSignersAndVaults ~ err:", err);
-    throw new Error(err);
-  }
-};
-
-export const deleteBackup = async (appId) => {
-  const appImageModel: any = db.getAppImageModel();
-  let [appImage] = await appImageModel.find({ appId });
-  const labelModel: any = db.getLabelModel();
-  const vaultImageModel: any = db.getVaultImageModel();
-  const vaultMapModel: any = db.getVaultMapModel();
-
-  if (!appImage) {
-    throw new Error("no backup found");
-  }
-
-  try {
-    appImage.nodes = [];
-    appImage.wallets = [];
-    appImage.signers = [];
-    for (const labelId of appImage.labels) {
-      await labelModel.findOneAndDelete({ id: labelId });
-    }
-
-    for (const vaultId of appImage.vaults) {
-      await vaultImageModel.findOneAndDelete({ vaultId });
-      await vaultMapModel.deleteMany({ vaultId });
-    }
-
-    appImage.labels = [];
-    appImage.vaults = [];
-    await appImage.save((err) => {
-      if (err) {
-        console.log(err);
-        throw new Error(err);
-      }
-    });
-    return { updated: true, error: "" };
-  } catch (error) {
-    console.log("🚀 ~ deleteBackup ~ error:", error);
-    throw new Error(error);
-  }
-};
+export const deleteBackup = deleteAppBackup;
