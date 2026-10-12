@@ -141,8 +141,17 @@ export async function withBackupMutation<T>(
   return inTransaction(async session => {
     await assertBackupMutationRevision(appId, expectedRevision, session);
     const result = await work(session);
-    if (result !== false && (!result || (result as any).updated !== false))
+    if (result !== false && (!result || (result as any).updated !== false)) {
       await advanceBackupGeneration(appId, session, revisionedIncremental && expectedRevision !== undefined);
+      // Compute the token before committing. A separate read after the commit
+      // could observe another device's write and let stale ciphertext rebase.
+      if (revisionedIncremental && expectedRevision !== undefined) {
+        const newRevision = (await snapshot(appId, session)).revision;
+        return (result && typeof result === "object"
+          ? { ...result, newRevision }
+          : { updated: true, newRevision }) as T;
+      }
+    }
     return result;
   });
 }
@@ -188,7 +197,7 @@ export async function deleteBackupEntities(appId: string, wallets?: string[], si
       if (result.modifiedCount || revisioned) await advanceBackupGeneration(appId, session, revisioned);
     }
     else if (revisioned) await advanceBackupGeneration(appId, session, true);
-    return { updated: true, error: "" };
+    return { updated: true, error: "", ...(revisioned ? {newRevision:(await snapshot(appId, session)).revision} : {}) };
   });
 }
 
@@ -351,7 +360,7 @@ export async function saveBackupVault(data: any) {
     await pruneRemovedVaultMaps(data.vaultId, (existing?.signerIds || []).filter(id => !retainedIds.includes(id)), session);
     await db.getAppImageModel().updateOne({ appId }, { $addToSet: { vaults: data.vaultId } }, { session });
     await advanceBackupGeneration(appId, session, revisioned);
-    return { updated: true, error: "" };
+    return { updated: true, error: "", ...(revisioned ? {newRevision:(await snapshot(appId, session)).revision} : {}) };
   });
 }
 

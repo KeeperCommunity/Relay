@@ -155,13 +155,39 @@ test('version-only incremental update succeeds without nodes and preserves recor
 test('revisioned incrementals reject a delayed old ciphertext and fence unversioned clients',async()=>{
  const p=await payload('incremental-cas');await service.repairAppBackup(p);
  const first=(await service.getBackupSnapshot(p.appId)).revision;
- assert.equal((await legacy.updateAppImage(p.appId,null,{w:'new-ciphertext'},null,null,null,null,false,first)).updated,true);
+ const updated=await legacy.updateAppImage(p.appId,null,{w:'new-ciphertext'},null,null,null,null,false,first);
+ assert.equal(updated.updated,true);
+ assert.match(updated.newRevision,/^[a-f0-9]{64}$/);
+ assert.equal(updated.newRevision,(await service.getBackupSnapshot(p.appId)).revision);
  await assert.rejects(legacy.updateAppImage(p.appId,null,{w:'old-ciphertext'},null,null,null,null,false,first),/Backup changed/);
  assert.equal((await legacy.updateAppImage(p.appId,null,{w:'old-unversioned'})).updated,false);
  const stored=await service.getBackupSnapshot(p.appId);
  assert.equal(stored.appImage.wallets.w,'new-ciphertext');
  assert.equal(stored.appImage.incrementalRevisionRequired,true);
  assert.notEqual(stored.revision,first);
+});
+test('every v2 mutation returns its own committed revision',async()=>{
+ const p=await payload('v2-response-revisions');
+ const repair=await service.repairAppBackup({...p,signersObject:{old:'encrypted-signer'}},true);
+ assert.match(repair.newRevision,/^[a-f0-9]{64}$/);
+ assert.equal(repair.newRevision,(await service.getBackupSnapshot(p.appId)).revision);
+ const check=async mutate=>{
+  const before=(await service.getBackupSnapshot(p.appId)).revision;
+  const result=await mutate(before);
+  assert.notEqual(result,false);
+  assert.notEqual(result.updated,false);
+  assert.match(result.newRevision,/^[a-f0-9]{64}$/);
+  assert.notEqual(result.newRevision,before);
+  assert.equal(result.newRevision,(await service.getBackupSnapshot(p.appId)).revision);
+ };
+ await check(revision=>legacy.updateAppImage(p.appId,null,{w:'next-wallet'},null,null,null,null,false,revision));
+ await check(revision=>legacy.migrateXfp(p.appId,[{oldSignerId:'old',newSignerId:'new',newSignerDetails:'next-signer'}],revision));
+ await check(revision=>legacy.modifyLabels(p.appId,[{id:'new-label',content:'encrypted-label'}],[],revision));
+ await check(revision=>legacy.addVaultImage(p.appId,null,'new-vault',null,'encrypted-vault',[],null,null,false,revision));
+ await check(revision=>legacy.updateVault('new-vault','next-vault',p.appId,false,[],revision));
+ await check(revision=>legacy.deleteVaults(p.appId,['new-vault'],revision));
+ await check(revision=>legacy.deleteAppImageEntity(p.appId,['w'],['new'],revision));
+ await check(revision=>legacy.deleteBackup(p.appId,revision));
 });
 test('paused old CAS transaction retries after a newer wallet commit and rejects stale ciphertext',async()=>{
  const p=await payload('incremental-inflight-race');await service.repairAppBackup(p);

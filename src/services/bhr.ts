@@ -185,7 +185,7 @@ export const updateVault = async (vaultId, vault, appId?, isArchived?, signersDa
       isUpdate: true,
       expectedRevision,
     });
-    return result?.updated ? {} : false;
+    return result?.updated ? (expectedRevision !== undefined ? {newRevision:result.newRevision} : {}) : false;
   } catch (error) {
     if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return false;

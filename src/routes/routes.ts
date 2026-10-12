@@ -1133,9 +1133,10 @@ export default class Routes {
           default:
             throw new InvalidBackupRequest("Unknown backup mutation");
         }
-        if (result === false || result?.updated === false)
+        if (result === false || result?.updated === false ||
+            typeof result?.newRevision !== "string" || !/^[a-f0-9]{64}$/.test(result.newRevision))
           return res.status(503).json({updated:false,error:"BACKUP_NOT_UPDATED"});
-        return res.status(200).json({updated:true,preconditionApplied:true});
+        return res.status(200).json({updated:true,preconditionApplied:true,newRevision:result.newRevision});
       } catch (error) {
         return sendBackupMutationError(res, error);
       }
