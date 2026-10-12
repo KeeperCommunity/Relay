@@ -54,7 +54,7 @@ async function snapshot(appId: string, session: mongoose.ClientSession) {
   const labels = await db.getLabelModel().find({ id: { $in: labelIds } }).session(session).lean() as any[];
   const peerReferences = await db.getAppImageModel().find({
     appId:{$ne:appId}, labels:{$in:labelIds},
-  }).session(session).lean() as any[];
+  }, {labels:1}).session(session).lean() as any[];
   const requestedLabelIds = new Set(labelIds);
   const sharedLabelIds = new Set<string>();
   for (const peer of peerReferences) for (const id of peer.labels || [])
