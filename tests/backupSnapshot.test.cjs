@@ -187,6 +187,28 @@ test('paused old CAS transaction retries after a newer wallet commit and rejects
   assert.equal((await service.getBackupSnapshot(p.appId)).appImage.wallets.w,'new-ciphertext');
  }finally{release();app.updateOne=original;if(old)await Promise.allSettled([old]);}
 });
+test('already-sent unversioned wallet transaction cannot land after the first CAS commit',async()=>{
+ const p=await payload('incremental-legacy-inflight');await service.repairAppBackup(p);
+ const expectedRevision=(await service.getBackupSnapshot(p.appId)).revision;
+ const original=app.updateOne;let announce,release,paused=false;
+ const started=new Promise(resolve=>{announce=resolve;});
+ const gate=new Promise(resolve=>{release=resolve;});
+ app.updateOne=async function(filter,changes,options){
+  if(changes.$set?.['wallets.w']==='old-unversioned' && !paused){paused=true;announce();await gate;}
+  return original.call(this,filter,changes,options);
+ };
+ let old;
+ try{
+  old=legacy.updateAppImage(p.appId,null,{w:'old-unversioned'});
+  await started;
+  assert.equal((await legacy.updateAppImage(p.appId,null,{w:'new-revisioned'},null,null,null,null,false,expectedRevision)).updated,true);
+  release();
+  assert.equal((await old).updated,false);
+  const stored=await service.getBackupSnapshot(p.appId);
+  assert.equal(stored.appImage.wallets.w,'new-revisioned');
+  assert.equal(stored.appImage.incrementalRevisionRequired,true);
+ }finally{release();app.updateOne=original;if(old)await Promise.allSettled([old]);}
+});
 test('all incremental delete, vault, label and signer paths reject stale revisions',async()=>{
  const p=await payload('incremental-paths');
  p.signersObject={key:'new-signer'};
