@@ -330,6 +330,8 @@ class Database {
       { unique: true },
     );
     this.articleChunkSchema.index({ ragTimestamp: -1 });
+    // Snapshot ownership checks must not scan every account for each label.
+    this.appImageSchema.index({ labels: 1 });
     this.appVaultImageSchema.index({ appId: 1, vaultId: 1 }, { unique: true });
     this.faucetQuotaSchema.index({ appId: 1, utcDate: 1 }, { unique: true });
     this.faucetQuotaSchema.index(

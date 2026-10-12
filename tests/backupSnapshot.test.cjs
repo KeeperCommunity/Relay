@@ -187,6 +187,10 @@ test('historical shared label reference withholds ambiguous ciphertext from both
   expectedRevision:firstSnapshot.revision,replaceCurrentState:true},true),service.BackupConflict);
  assert.equal((await label.findOne({id:'historical-shared-label'}).lean()).content,'first-owner-ciphertext');
 });
+test('shared-label ownership lookup has its required multikey index',async()=>{
+ const indexes=await app.collection.indexes();
+ assert.ok(indexes.some(index=>index.key.labels===1));
+});
 test('malformed encrypted payload cannot create records',async()=>{
  const p=await payload('invalid');p.nodes=[{}];await assert.rejects(service.repairAppBackup(p),/Invalid encrypted node/);assert.equal(await app.countDocuments({appId:'invalid'}),0);
 });
