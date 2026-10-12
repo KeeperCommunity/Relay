@@ -32,7 +32,9 @@ test('snapshot database failure terminates with a fixed retryable error',async()
 test('snapshot success preserves revision and encrypted records',async()=>{
  const res=mockResponse(), snapshot={revision:'a'.repeat(64),appImage:{wallets:{w:'synthetic-ciphertext'}},labels:[],allVaultImages:[]};
  await route({}, '/getBackupSnapshot', {getBackupSnapshot:async()=>snapshot})({body:{appId:'disposable'}},res);
- assert.equal(res.result.status,200);assert.equal(res.result.body,snapshot);
+ assert.equal(res.result.status,200);assert.equal(res.result.body.revision,snapshot.revision);
+ assert.equal(res.result.body.appImage,snapshot.appImage);
+ assert.equal(res.result.body.revisionedMutations,true);
 });
 class BackupConflict extends Error {}
 class InvalidBackupRequest extends Error {}
@@ -59,6 +61,15 @@ test('revisioned mutation route refuses unknown operations and reports conflicts
  await handler({body:{operation:'deleteBackup',appId:'disposable',expectedRevision:token}},conflict);
  assert.equal(invalid.result.status,400);assert.equal(conflict.result.status,409);
  assert.equal(conflict.result.body.error,'BACKUP_CHANGED');
+});
+test('v2 repair operation activates the incremental fence and acknowledges CAS',async()=>{
+ const token='a'.repeat(64),res=mockResponse();let activated;
+ await route({},'/revisionedBackupMutation',
+  {sendBackupMutationError:mutationError,InvalidBackupRequest,
+   repairAppBackup:async(_body,fence)=>{activated=fence;return {updated:true};}})
+  ({body:{operation:'repairAppBackup',appId:'disposable',expectedRevision:token}},res);
+ assert.equal(res.result.status,200);assert.equal(res.result.body.preconditionApplied,true);
+ assert.equal(activated,true);
 });
 for (const [error,status,message] of [[new BackupConflict(),409,'BACKUP_CHANGED'],[new InvalidBackupRequest(),400,'BACKUP_NOT_UPDATED'],[new Error('synthetic-private-canary'),503,'BACKUP_NOT_UPDATED']]) test(`repair failure returns stable code ${status}`,async()=>{
  const res=mockResponse();

@@ -421,11 +421,11 @@ function assertPayload(data: any) {
 // This endpoint never silently falls back to the legacy destructive replacement.
 // Transactions atomically update the referenced records and app image. On a
 // concurrent-write retry, the token is checked again against the new snapshot.
-export async function repairAppBackup(data: any) {
-  return writeBackup(data, false);
+export async function repairAppBackup(data: any, activateIncrementalFence = false) {
+  return writeBackup(data, false, activateIncrementalFence);
 }
 
-async function writeBackup(data: any, legacy: boolean) {
+async function writeBackup(data: any, legacy: boolean, activateIncrementalFence = false) {
   assertPayload(data);
   return withBackupMutation(data.appId, async session => {
     const current = await snapshot(data.appId, session);
@@ -486,7 +486,7 @@ async function writeBackup(data: any, legacy: boolean) {
       ...(!legacy ? { backupRevisionRequired:true } : {}),
     }, $setOnInsert:{ appId:data.appId, publicId:data.publicId, subscription:data.subscription } }, {upsert:true,session});
     return { updated:true };
-  }, legacy ? undefined : data.expectedRevision);
+  }, legacy ? undefined : data.expectedRevision, activateIncrementalFence);
 }
 
 // Old clients have no revision token. Read their starting state, preserve archive

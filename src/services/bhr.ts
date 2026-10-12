@@ -363,35 +363,44 @@ export const modifyLabels = async (appId, addLabels, deleteLabels, expectedRevis
       if (addLabels && addLabels.length > 0) {
         const newLabels = [];
         for (const label of addLabels) {
-          if (!label || !label.content) {
-            continue;
-          }
-          // Check if label exists
+          if (!label || typeof label.id !== "string" || !label.id || /[.$]/.test(label.id) ||
+              typeof label.content !== "string" || !label.content)
+            throw new InvalidBackupRequest("Invalid encrypted label");
+          const otherOwner = await appImageModel.findOne({
+            appId: {$ne:appId}, labels:label.id,
+          }).session(session).lean();
+          if (otherOwner) throw new BackupConflict();
           const existingLabel = await labelModel.findOne({ id: label.id }).session(session);
           if (existingLabel) {
+            await labelModel.updateOne({id:label.id}, {$set:{content:label.content}}, {session});
             newLabels.push(existingLabel.id);
           } else {
-            // need to create that label
             const createdLabels = await labelModel.create([label], {session});
             newLabels.push(createdLabels[0].id);
           }
         }
 
         appImage.labels = appImage.labels || [];
-        appImage.labels.push(...newLabels);
+        for (const id of newLabels) if (!appImage.labels.includes(id)) appImage.labels.push(id);
         await appImage.save({session});
       }
 
       if (deleteLabels && deleteLabels.length > 0) {
-        const deletedLabels = await labelModel.deleteMany({
-          id: { $in: deleteLabels },
-        }).session(session);
-        if (appImage.labels && appImage.labels.length > 0) {
-          appImage.labels = appImage.labels.filter(
-            (labelId) => !deleteLabels.includes(labelId.toString())
-          );
+        if (!Array.isArray(deleteLabels) || deleteLabels.some(id =>
+            typeof id !== "string" || !id || /[.$]/.test(id)))
+          throw new InvalidBackupRequest("Invalid encrypted label IDs");
+        const owned = new Set((appImage.labels || []).map(id => id.toString()));
+        const removed = deleteLabels.filter(id => owned.has(id));
+        if (removed.length) {
+          appImage.labels = appImage.labels.filter(labelId => !removed.includes(labelId.toString()));
+          await appImage.save({session});
+          for (const id of removed) {
+            const otherOwner = await appImageModel.findOne({
+              appId: {$ne:appId}, labels:id,
+            }).session(session).lean();
+            if (!otherOwner) await labelModel.deleteOne({id}).session(session);
+          }
         }
-        await appImage.save({session});
       }
 
       return { updated: true };

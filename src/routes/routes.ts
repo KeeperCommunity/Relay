@@ -1072,7 +1072,9 @@ export default class Routes {
 
     router.post("/getBackupSnapshot", async (req, res) => {
       if (typeof req.body.appId !== "string" || !req.body.appId) return res.status(400).json({ error: "Invalid backup account" });
-      try { return res.status(200).json(await getBackupSnapshot(req.body.appId)); }
+      try { return res.status(200).json({
+        ...await getBackupSnapshot(req.body.appId), revisionedMutations:true,
+      }); }
       catch { return res.status(503).json({ error: "Backup snapshot unavailable" }); }
     });
     // A distinct route prevents a revisioned client from writing through an old
@@ -1124,6 +1126,9 @@ export default class Routes {
             break;
           case "deleteBackup":
             result = await bhr.deleteBackup(body.appId, body.expectedRevision);
+            break;
+          case "repairAppBackup":
+            result = await repairAppBackup(body, true);
             break;
           default:
             throw new InvalidBackupRequest("Unknown backup mutation");

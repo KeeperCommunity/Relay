@@ -209,6 +209,34 @@ test('already-sent unversioned wallet transaction cannot land after the first CA
   assert.equal(stored.appImage.incrementalRevisionRequired,true);
  }finally{release();app.updateOne=original;if(old)await Promise.allSettled([old]);}
 });
+for(const operation of ['update','delete']) test(`v2 repair fences an already-sent unversioned ${operation}`,async()=>{
+ const p=await payload(`repair-fences-old-${operation}`);await service.repairAppBackup(p);
+ const expectedRevision=(await service.getBackupSnapshot(p.appId)).revision;
+ const original=app.updateOne;let announce,release,paused=false;
+ const started=new Promise(resolve=>{announce=resolve;});
+ const gate=new Promise(resolve=>{release=resolve;});
+ app.updateOne=async function(filter,changes,options){
+  const isOld=operation==='update'
+   ? changes.$set?.['wallets.w']==='old-unversioned'
+   : Object.prototype.hasOwnProperty.call(changes.$unset || {},'wallets.w');
+  if(isOld && !paused){paused=true;announce();await gate;}
+  return original.call(this,filter,changes,options);
+ };
+ let old;
+ try{
+  old=operation==='update'
+   ? legacy.updateAppImage(p.appId,null,{w:'old-unversioned'})
+   : legacy.deleteAppImageEntity(p.appId,['w'],[]);
+  await started;
+  assert.equal((await service.repairAppBackup({...p,expectedRevision,
+   walletObject:{w:'new-repaired'}},true)).updated,true);
+  release();
+  assert.equal((await old).updated,false);
+  const stored=await service.getBackupSnapshot(p.appId);
+  assert.equal(stored.appImage.wallets.w,'new-repaired');
+  assert.equal(stored.appImage.incrementalRevisionRequired,true);
+ }finally{release();app.updateOne=original;if(old)await Promise.allSettled([old]);}
+});
 test('all incremental delete, vault, label and signer paths reject stale revisions',async()=>{
  const p=await payload('incremental-paths');
  p.signersObject={key:'new-signer'};
@@ -301,6 +329,24 @@ test('label ownership collision fails without altering either backup',async()=>{
  await assert.rejects(service.repairAppBackup(other),/Backup changed/);
  assert.equal((await service.getBackupSnapshot(owner.appId)).labels[0].content,'keep-this');
  assert.equal((await service.getBackupSnapshot(other.appId)).exists,false);
+});
+test('incremental labels cannot overwrite or delete another account recovery record',async()=>{
+ const first=await payload('incremental-label-owner');
+ first.labels=[{id:'shared-label-id',content:'owner-ciphertext'}];
+ await service.repairAppBackup(first);
+ const second=await payload('incremental-label-other');await service.repairAppBackup(second);
+ const before=(await service.getBackupSnapshot(second.appId)).revision;
+ await assert.rejects(legacy.modifyLabels(second.appId,
+  [{id:'shared-label-id',content:'attacker-ciphertext'}],[],before),/Backup changed/);
+ assert.equal((await legacy.modifyLabels(second.appId,[],['shared-label-id'],before)).updated,true);
+ assert.equal((await service.getBackupSnapshot(first.appId)).labels[0].content,'owner-ciphertext');
+ // Older data can legitimately contain a shared reference. Unlinking one app
+ // must retain the label document until the final participant releases it.
+ await app.updateOne({appId:second.appId},{$addToSet:{labels:'shared-label-id'}});
+ const sharedRevision=(await service.getBackupSnapshot(second.appId)).revision;
+ assert.equal((await legacy.modifyLabels(second.appId,[],['shared-label-id'],sharedRevision)).updated,true);
+ assert.equal((await service.getBackupSnapshot(first.appId)).labels[0].content,'owner-ciphertext');
+ assert.deepEqual((await service.getBackupSnapshot(second.appId)).appImage.labels,[]);
 });
 
 test('incremental deletion acknowledges commit and leaves valid empty wallet/key maps',async()=>{
