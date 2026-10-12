@@ -30,7 +30,7 @@ RELAY_SOURCE_DIR="$PWD"
 git clone --filter=blob:none --sparse --branch codex/r3-public-contributor-sprint https://github.com/KeeperCommunity/bitcoin-keeper.git ../keeper-public-local-adapter
 cd ../keeper-public-local-adapter
 git sparse-checkout set dev/local-backend
-git checkout 19e079ae4486dacf1f79bf5e527384e608872977
+git checkout 58208450c88c0aabd4a44df52630c35843c16484
 ./dev/local-backend/dev prepare-signing
 export SIGNING_SOURCE_DIR="$PWD/dev/local-backend/.sources/signing"
 cd "$RELAY_SOURCE_DIR"
@@ -41,7 +41,7 @@ curl --fail http://127.0.0.1:3003/health
 
 This prepares Signing Server revision `3cc7728c27328e7b0358d1f91a32d8d13feba90a`, verifies the adapter checksums, and starts the services behind a loopback gateway on ports 3000, 4002 and 3003. Relay, Mongo and Signing Server share an internal network with no external egress; only the gateway has host access. Signing Server creates independent disposable development identities in its named volume; preserve that volume together with Mongo when reusing local records. Do not export its contents. Local push delivery and scheduled jobs are disabled; email is captured inside the local signing volume and is never delivered.
 
-Stop this stack with `docker compose -f compose.local.yaml -f compose.local-with-signing.yaml down`. This retains the Mongo and signing volumes. The pairing verifies local service availability; bitcoin signing, recovery, inheritance and timer-dependent behavior need their own separate checks. For the complete app contributor stack, use the current public contributor PR #7030 and run `./dev/local-backend/dev up` from that app checkout. That app revision pins Relay `4c54e28738815546718775dbbdb39f0342c1b646`, which includes the backup snapshot and repair protocol plus its revision guards.
+Stop this stack with `docker compose -f compose.local.yaml -f compose.local-with-signing.yaml down`. This retains the Mongo and signing volumes. The pairing verifies local service availability; bitcoin signing, recovery, inheritance and timer-dependent behavior need their own separate checks. For the complete app contributor stack, use public contributor PR #7030 at `58208450c88c0aabd4a44df52630c35843c16484` and run `./dev/local-backend/dev up` from that app checkout. Its `dev/local-backend/sources.lock.json` pins Relay `ee935359f22ff7932ea0a62e9084d4b49801f4aa`, which includes the backup snapshot and repair protocol, revision guards, signer-map cleanup, and old-client incremental field aliases. The exact pins describe tested source; source PR approval and a successful local stack do not establish hosted deployment parity.
 
 The earlier public-source paired setup was checked on October 6, 2026 with isolated local ports and disposable volumes: both health endpoints, synthetic Relay record create/read/update/clear, Socket.IO polling and WebSocket connections, and rejection of an unauthenticated Signing Server setup request passed. The app contributor CI verifies its pinned stack from public sources and also exercises backup snapshot/repair, stale revisions, content changing from A to B and back to A, and persistence across service restarts. Check the linked app PR for results at the pinned revision; the earlier setup check does not attest to a newer stack.
 
