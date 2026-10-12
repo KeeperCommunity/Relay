@@ -36,6 +36,30 @@ test('snapshot success preserves revision and encrypted records',async()=>{
 });
 class BackupConflict extends Error {}
 class InvalidBackupRequest extends Error {}
+const mutationError=(res,error)=>res.status(error instanceof BackupConflict?409:error instanceof InvalidBackupRequest?400:503)
+ .json({updated:false,error:error instanceof BackupConflict?'BACKUP_CHANGED':'BACKUP_NOT_UPDATED'});
+test('revisioned mutation route requires a valid token before any backend call',async()=>{
+ let calls=0;const res=mockResponse();
+ await route({updateAppImage:async()=>{calls++;}},'/revisionedBackupMutation',
+  {sendBackupMutationError:mutationError,InvalidBackupRequest})({body:{operation:'updateAppImage',appId:'disposable'}},res);
+ assert.equal(res.result.status,400);assert.equal(calls,0);
+});
+test('revisioned mutation route passes CAS token and acknowledges its application',async()=>{
+ const token='a'.repeat(64),res=mockResponse();let received;
+ await route({updateAppImage:async(...args)=>{received=args;return {updated:true};}},'/revisionedBackupMutation',
+  {sendBackupMutationError:mutationError,InvalidBackupRequest})({body:{operation:'updateAppImage',appId:'disposable',expectedRevision:token,walletsObject:{w:'ciphertext'}}},res);
+ assert.equal(res.result.status,200);assert.equal(res.result.body.updated,true);assert.equal(res.result.body.preconditionApplied,true);
+ assert.equal(received[0],'disposable');assert.equal(received[2].w,'ciphertext');assert.equal(received[8],token);
+});
+test('revisioned mutation route refuses unknown operations and reports conflicts',async()=>{
+ const token='a'.repeat(64),invalid=mockResponse(),conflict=mockResponse();
+ const handler=route({deleteBackup:async()=>{throw new BackupConflict();}},'/revisionedBackupMutation',
+  {sendBackupMutationError:mutationError,InvalidBackupRequest});
+ await handler({body:{operation:'unknown',appId:'disposable',expectedRevision:token}},invalid);
+ await handler({body:{operation:'deleteBackup',appId:'disposable',expectedRevision:token}},conflict);
+ assert.equal(invalid.result.status,400);assert.equal(conflict.result.status,409);
+ assert.equal(conflict.result.body.error,'BACKUP_CHANGED');
+});
 for (const [error,status,message] of [[new BackupConflict(),409,'BACKUP_CHANGED'],[new InvalidBackupRequest(),400,'BACKUP_NOT_UPDATED'],[new Error('synthetic-private-canary'),503,'BACKUP_NOT_UPDATED']]) test(`repair failure returns stable code ${status}`,async()=>{
  const res=mockResponse();
  await route({}, '/repairAppBackup', {BackupConflict,InvalidBackupRequest,repairAppBackup:async()=>{throw error;}})({body:{appId:'disposable'}},res);

@@ -152,6 +152,64 @@ test('version-only incremental update succeeds without nodes and preserves recor
  assert.equal((await legacy.updateAppImage('version',undefined,undefined,undefined,'2.5.17')).updated,true);
  const s=await service.getBackupSnapshot('version');assert.equal(s.appImage.version,'2.5.17');assert.equal(s.appImage.wallets.w,'encrypted-wallet');
 });
+test('revisioned incrementals reject a delayed old ciphertext and fence unversioned clients',async()=>{
+ const p=await payload('incremental-cas');await service.repairAppBackup(p);
+ const first=(await service.getBackupSnapshot(p.appId)).revision;
+ assert.equal((await legacy.updateAppImage(p.appId,null,{w:'new-ciphertext'},null,null,null,null,false,first)).updated,true);
+ await assert.rejects(legacy.updateAppImage(p.appId,null,{w:'old-ciphertext'},null,null,null,null,false,first),/Backup changed/);
+ assert.equal((await legacy.updateAppImage(p.appId,null,{w:'old-unversioned'})).updated,false);
+ const stored=await service.getBackupSnapshot(p.appId);
+ assert.equal(stored.appImage.wallets.w,'new-ciphertext');
+ assert.equal(stored.appImage.incrementalRevisionRequired,true);
+ assert.notEqual(stored.revision,first);
+});
+test('paused old CAS transaction retries after a newer wallet commit and rejects stale ciphertext',async()=>{
+ const p=await payload('incremental-inflight-race');await service.repairAppBackup(p);
+ const expectedRevision=(await service.getBackupSnapshot(p.appId)).revision;
+ const original=app.updateOne;let announce,release,paused=false,attempts=0;
+ const started=new Promise(resolve=>{announce=resolve;});
+ const gate=new Promise(resolve=>{release=resolve;});
+ app.updateOne=async function(filter,changes,options){
+  if(changes.$set?.['wallets.w']==='old-ciphertext'){
+   attempts++;
+   if(!paused){paused=true;announce();await gate;}
+  }
+  return original.call(this,filter,changes,options);
+ };
+ let old;
+ try{
+  old=legacy.updateAppImage(p.appId,null,{w:'old-ciphertext'},null,null,null,null,false,expectedRevision);
+  await started;
+  assert.equal((await legacy.updateAppImage(p.appId,null,{w:'new-ciphertext'},null,null,null,null,false,expectedRevision)).updated,true);
+  release();
+  await assert.rejects(old,/Backup changed/);
+  assert.ok(attempts>=1);
+  assert.equal((await service.getBackupSnapshot(p.appId)).appImage.wallets.w,'new-ciphertext');
+ }finally{release();app.updateOne=original;if(old)await Promise.allSettled([old]);}
+});
+test('all incremental delete, vault, label and signer paths reject stale revisions',async()=>{
+ const p=await payload('incremental-paths');
+ p.signersObject={key:'new-signer'};
+ p.vaultObject={v:{vaultId:'v',vault:'new-vault',isArchived:false,signersData:[]}};
+ p.labels=[{id:'tag',content:'new-label'}];
+ await service.repairAppBackup(p);
+ const old=(await service.getBackupSnapshot(p.appId)).revision;
+ await legacy.updateAppImage(p.appId,null,{w:'new-wallet'},null,null,null,null,false,old);
+ await assert.rejects(legacy.deleteAppImageEntity(p.appId,['w'],[],old),/Backup changed/);
+ await assert.rejects(legacy.deleteVaults(p.appId,['v'],old),/Backup changed/);
+ await assert.rejects(legacy.deleteBackup(p.appId,old),/Backup changed/);
+ await assert.rejects(legacy.updateVault('v','old-vault',p.appId,false,[],old),/Backup changed/);
+ await assert.rejects(legacy.addVaultImage(p.appId,null,'v2',null,'old-vault',[],null,null,false,old),/Backup changed/);
+ await assert.rejects(legacy.modifyLabels(p.appId,[{id:'tag',content:'old-label'}],[],old),/Backup changed/);
+ await assert.rejects(legacy.migrateXfp(p.appId,[{oldSignerId:'key',newSignerId:'older',newSignerDetails:'old-signer'}],old),/Backup changed/);
+ const stored=await service.getBackupSnapshot(p.appId);
+ assert.equal(stored.appImage.wallets.w,'new-wallet');
+ assert.equal(stored.appImage.signers.key,'new-signer');
+ assert.deepEqual(stored.appImage.vaults,['v']);
+ assert.deepEqual(stored.appImage.labels,['tag']);
+ assert.equal(stored.allVaultImages[0].vault,'new-vault');
+ assert.equal(stored.labels[0].content,'new-label');
+});
 test('concurrent incremental updates preserve both wallets',async()=>{
  const p=await payload('increments');await service.repairAppBackup(p);
  const results=await Promise.all([legacy.updateAppImage('increments',null,{a:'device-a'}),legacy.updateAppImage('increments',null,{b:'device-b'})]);
@@ -330,7 +388,7 @@ function vaultUpdateRouteHandler(){
  }
  visit(source);assert.ok(registration);
  vm.runInNewContext(ts.transpileModule(registration.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText,
-  {bhr:legacy,console,router:{post:(_path,handler)=>{callback=handler;}}});
+  {bhr:legacy,console,sendBackupMutationError:(res,error)=>res.status(503).json({updated:false,error:'BACKUP_NOT_UPDATED'}),router:{post:(_path,handler)=>{callback=handler;}}});
  return callback;
 }
 

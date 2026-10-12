@@ -8,6 +8,9 @@ import {
   deleteBackupVaults,
   getBackupSnapshot,
   withBackupMutation,
+  BackupConflict,
+  BackupUpgradeRequired,
+  InvalidBackupRequest,
 } from "./backupSnapshot";
 import { AppImage, AppSubscription } from "../interface";
 import db from "../db";
@@ -22,7 +25,8 @@ export const updateAppImage = async (
   version,
   signersObject,
   nodes,
-  replaceNodes = false
+  replaceNodes = false,
+  expectedRevision?: string
 ): Promise<{ updated: boolean; error?: string }> => {
   if (typeof appId !== "string" || !appId) return {updated:false,error:"Invalid backup account"};
   const appImageModel: any = db.getAppImageModel();
@@ -71,8 +75,9 @@ export const updateAppImage = async (
         await appImageModel.updateOne({ appId }, { $set:changes, $setOnInsert:defaults }, { upsert:true,runValidators:true,session });
       }
       return { updated:true,error:"" };
-    });
-  } catch {
+    }, expectedRevision, true);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated:false,error:"Backup update failed" };
   }
 };
@@ -80,19 +85,22 @@ export const updateAppImage = async (
 export const deleteAppImageEntity = async (
   appId,
   wallets,
-  signers
+  signers,
+  expectedRevision?: string
 ): Promise<{ updated: boolean; error?: string }> => {
   try {
-    return await deleteBackupEntities(appId, wallets, signers);
-  } catch {
+    return await deleteBackupEntities(appId, wallets, signers, expectedRevision);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Backup deletion failed" };
   }
 };
 
-export const deleteVaults = async (appId, vaults) => {
+export const deleteVaults = async (appId, vaults, expectedRevision?: string) => {
   try {
-    return await deleteBackupVaults(appId, vaults);
-  } catch {
+    return await deleteBackupVaults(appId, vaults, expectedRevision);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Vault backup deletion failed" };
   }
 };
@@ -136,7 +144,8 @@ export const addVaultImage = async (
   signersData,
   subscription,
   archiveVaultId?,
-  isArchived?
+  isArchived?,
+  expectedRevision?: string
 ) => {
   try {
     return await saveBackupVault({
@@ -149,8 +158,10 @@ export const addVaultImage = async (
       subscription,
       archiveVaultId,
       isArchived,
+      expectedRevision,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Vault backup update failed" };
   }
 };
@@ -163,7 +174,7 @@ export const archiveVault = async (vaultId) => {
   }
 };
 
-export const updateVault = async (vaultId, vault, appId?, isArchived?, signersData?) => {
+export const updateVault = async (vaultId, vault, appId?, isArchived?, signersData?, expectedRevision?: string) => {
   try {
     const result = await saveBackupVault({
       appId,
@@ -172,9 +183,11 @@ export const updateVault = async (vaultId, vault, appId?, isArchived?, signersDa
       isArchived,
       signersData,
       isUpdate: true,
+      expectedRevision,
     });
     return result?.updated ? {} : false;
-  } catch {
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return false;
   }
 };
@@ -307,7 +320,8 @@ interface SignerChange {
 
 export const migrateXfp = async (
   appId: string,
-  signerChanges: SignerChange[]
+  signerChanges: SignerChange[],
+  expectedRevision?: string
 ) => {
   try {
     return await withBackupMutation(appId, async session => {
@@ -327,14 +341,15 @@ export const migrateXfp = async (
       } else {
         return false;
       }
-    });
+    }, expectedRevision, true);
   } catch (err) {
+    if (err instanceof BackupConflict || (expectedRevision !== undefined && err instanceof BackupUpgradeRequired)) throw err;
     console.log(err);
     return false;
   }
 };
 
-export const modifyLabels = async (appId, addLabels, deleteLabels) => {
+export const modifyLabels = async (appId, addLabels, deleteLabels, expectedRevision?: string) => {
   try {
     return await withBackupMutation(appId, async session => {
       const appImageModel: any = db.getAppImageModel();
@@ -380,8 +395,9 @@ export const modifyLabels = async (appId, addLabels, deleteLabels) => {
       }
 
       return { updated: true };
-    });
+    }, expectedRevision, true);
   } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     console.error("Error modifying labels:", error);
     throw new Error("An error occurred while modifying labels");
   }
