@@ -75,7 +75,8 @@ export const createNewApp = async (
       const appImageInstance = new appImageModel({
         appId,
         publicId,
-        wallets: [],
+        wallets: {},
+        signers: {},
         version: appversion,
         nodes: [],
       });

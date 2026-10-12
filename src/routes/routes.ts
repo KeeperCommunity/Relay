@@ -1,3 +1,4 @@
+import { BackupUpgradeRequired, InvalidBackupRequest, BackupConflict, getBackupSnapshot, repairAppBackup } from "../services/backupSnapshot";
 import { Express, Router, Request, Response, response } from "express";
 
 import config from "../config";
@@ -502,15 +503,22 @@ export default class Routes {
       if (!req.body.appId) {
         return res.status(400).json({ err: "Input param missing - app's id" });
       }
+      // Older mobile clients send walletObject and signersObjects.
+      const hasField = (name: string) => Object.prototype.hasOwnProperty.call(req.body, name);
+      if ((hasField("walletsObject") && hasField("walletObject")) ||
+          (hasField("signersObject") && hasField("signersObjects"))) {
+        return res.status(400).json({ updated: false, error: "Conflicting backup record fields" });
+      }
       try {
         const result = await bhr.updateAppImage(
           req.body.appId,
           req.body.publicId,
-          req.body.walletsObject,
+          hasField("walletsObject") ? req.body.walletsObject : req.body.walletObject,
           req.body.subscription,
           req.body.version,
-          req.body.signersObject,
+          hasField("signersObject") ? req.body.signersObject : req.body.signersObjects,
           req.body.nodes,
+          req.body.replaceNodes === true,
         );
         res.status(200).json(result);
       } catch (err) {
@@ -555,32 +563,37 @@ export default class Routes {
           const updated = await bhr.updateVault(
             req.body.vaultId,
             req.body.vault,
+            req.body.appId ?? req.body.appID,
+            req.body.isArchived,
+            req.body.signersData,
           );
           if (updated) {
-            res.status(200).json({
+            return res.status(200).json({
               updated: true,
               error: "",
             });
           }
-        }
-        if (req.body.archiveVaultId) {
-          await bhr.archiveVault(req.body.archiveVaultId);
+          return res.status(503).json({
+            updated: false,
+            error: "Backup update failed",
+          });
         }
         const result = await bhr.addVaultImage(
-          req.body.appID,
+          req.body.appId ?? req.body.appID,
           req.body.vaultShellId,
           req.body.vaultId,
           req.body.scheme,
           req.body.vault,
           req.body.signersData,
           req.body.subscription,
+          req.body.archiveVaultId,
+          req.body.isArchived,
         );
         res.status(200).json(result);
-      } catch (err) {
-        console.log(err);
+      } catch {
         res.status(400).json({
           updated: false,
-          error: `"Error: ${err}`,
+          error: "Vault backup update failed",
         });
       }
     });
@@ -604,8 +617,10 @@ export default class Routes {
         } else {
           res.status(400).json({ err: "no appImage" });
         }
-      } catch (err) {
-        console.log(err);
+      } catch {
+        // Always terminate the request. The client must not mistake missing
+        // account metadata or a database failure for an empty recoverable image.
+        res.status(503).json({ err: "Backup temporarily unavailable" });
       }
     });
 
@@ -1049,6 +1064,20 @@ export default class Routes {
       }
     });
 
+    router.post("/getBackupSnapshot", async (req, res) => {
+      if (typeof req.body.appId !== "string" || !req.body.appId) return res.status(400).json({ error: "Invalid backup account" });
+      try { return res.status(200).json(await getBackupSnapshot(req.body.appId)); }
+      catch { return res.status(503).json({ error: "Backup snapshot unavailable" }); }
+    });
+    router.post("/repairAppBackup", async (req, res) => {
+      try { return res.status(200).json(await repairAppBackup(req.body)); }
+      catch (error) {
+        return res.status(error instanceof BackupConflict ? 409 : error instanceof InvalidBackupRequest ? 400 : 503).json({
+          updated: false, error: error instanceof BackupConflict ? "BACKUP_CHANGED" : "BACKUP_NOT_UPDATED",
+        });
+      }
+    });
+
     router.post("/backupAllSignersAndVaults", async (req, res) => {
       if (!req.body.appId) {
         return res.status(400).json({ err: "Input param missing - app's id" });
@@ -1057,8 +1086,10 @@ export default class Routes {
         const result = await bhr.backupAllSignersAndVaults(req.body);
         res.status(200).json(result);
       } catch (err) {
-        console.log("🚀 ~ Routes ~ router.post ~ err:", err);
-        res.status(400).json(err);
+        res.status(err instanceof BackupUpgradeRequired || err instanceof BackupConflict ? 409 : err instanceof InvalidBackupRequest ? 400 : 503).json({
+          updated: false,
+          error: err instanceof BackupUpgradeRequired ? "BACKUP_UPGRADE_REQUIRED" : err instanceof BackupConflict ? "BACKUP_CHANGED" : "BACKUP_NOT_UPDATED",
+        });
       }
     });
 

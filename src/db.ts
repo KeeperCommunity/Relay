@@ -129,6 +129,18 @@ class Database {
     vault: { type: Object, required: true },
   });
 
+  // Each app encrypts its copy with its own Recovery Key. Collaborative
+  // participants share the canonical vault ID, but must retain separate images.
+  private appVaultImageSchema = new Schema({
+    vaultId: { type: String, required: true, index: true },
+    vaultShellId: { type: String, index: true },
+    appId: { type: String, required: true },
+    isArchived: { type: Boolean, required: true, default: false },
+    signerIds: [{ type: String, required: true }],
+    scheme: { type: {}, required: false },
+    vault: { type: Object, required: true },
+  });
+
   private appImageSchema = new Schema({
     appId: { type: String, required: true, unique: true },
     publicId: { type: String, required: true, unique: true },
@@ -139,6 +151,10 @@ class Database {
     subscription: { type: String, required: false },
     version: { type: String, required: true },
     nodes: [{ type: String, required: false }],
+    // Once repaired, unversioned full replacements must never overwrite this image.
+    backupRevisionRequired: { type: Boolean, default: false },
+    // Retained by Delete Backup, preventing stale A → B → A revisions.
+    backupGeneration: { type: Number, default: 0, min: 0 },
   });
 
   private labelSchema = new Schema({
@@ -311,6 +327,7 @@ class Database {
       { unique: true },
     );
     this.articleChunkSchema.index({ ragTimestamp: -1 });
+    this.appVaultImageSchema.index({ appId: 1, vaultId: 1 }, { unique: true });
     this.faucetQuotaSchema.index({ appId: 1, utcDate: 1 }, { unique: true });
     this.faucetQuotaSchema.index(
       { createdAt: 1 },
@@ -347,6 +364,14 @@ class Database {
 
   public getVaultImageModel = () => {
     return mongoose.model("Vault Image", this.vaultImageSchema);
+  };
+
+  public getAppVaultImageModel = () => {
+    return mongoose.model(
+      "App Vault Image",
+      this.appVaultImageSchema,
+      "appVaultImages",
+    );
   };
 
   public getVaultMapModel = () => {
