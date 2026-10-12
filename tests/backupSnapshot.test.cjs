@@ -139,9 +139,33 @@ test('legacy full vault save removes a replaced active signer lookup',async()=>{
  assert.equal(await map.countDocuments({signerId:'old-legacy-signer'}),0);
  assert.equal((await map.findOne({signerId:'new-legacy-signer'}).lean()).vaultId,'legacy-replacement');
 });
-test('incomplete referenced records fail closed',async()=>{
- const p=await payload('incomplete');await service.repairAppBackup(p);await app.updateOne({appId:'incomplete'},{$set:{labels:['missing-record']}});
- await assert.rejects(service.getBackupSnapshot('incomplete'),/Incomplete backup/);
+test('orphan label is visible for repair but cannot be used for generic recovery or discarded',async()=>{
+ const p=await payload('incomplete');
+ p.labels=[{id:'missing-record',content:'local-encrypted-label'}];
+ await service.repairAppBackup(p);
+ await label.deleteOne({id:'missing-record'});
+ const broken=await service.getBackupSnapshot(p.appId);
+ assert.deepEqual(broken.unavailableLabelIds,['missing-record']);
+ assert.deepEqual(broken.labels,[]);
+ await assert.rejects(legacy.getAppImage(p.appId,'2.5.16'),/Recovery data unavailable/);
+ await assert.rejects(service.repairAppBackup({...p,expectedRevision:broken.revision,
+  labels:[],replaceCurrentState:true},true),service.BackupConflict);
+ const restored=await service.repairAppBackup({...p,expectedRevision:broken.revision,
+  replaceCurrentState:true},true);
+ assert.equal(restored.updated,true);
+ const complete=await service.getBackupSnapshot(p.appId);
+ assert.deepEqual(complete.unavailableLabelIds,[]);
+ assert.equal(complete.labels[0].content,'local-encrypted-label');
+ assert.equal(restored.newRevision,complete.revision);
+});
+test('legacy full backup cannot silently replace a dangling label reference',async()=>{
+ const p=await payload('legacy-orphan-label');
+ p.labels=[{id:'legacy-missing-label',content:'encrypted-label'}];
+ delete p.expectedRevision;
+ assert.equal((await legacy.backupAllSignersAndVaults(p)).updated,true);
+ await label.deleteOne({id:'legacy-missing-label'});
+ await assert.rejects(legacy.backupAllSignersAndVaults(p),/Backup changed/);
+ assert.deepEqual((await service.getBackupSnapshot(p.appId)).unavailableLabelIds,['legacy-missing-label']);
 });
 test('malformed encrypted payload cannot create records',async()=>{
  const p=await payload('invalid');p.nodes=[{}];await assert.rejects(service.repairAppBackup(p),/Invalid encrypted node/);assert.equal(await app.countDocuments({appId:'invalid'}),0);

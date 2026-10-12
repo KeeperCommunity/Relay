@@ -52,18 +52,22 @@ async function snapshot(appId: string, session: mongoose.ClientSession) {
   const labelIds = appImage.labels || [];
   const { allVaultImages, unavailableVaultIds } = await accountVaultImages(appId, vaultIds, session);
   const labels = await db.getLabelModel().find({ id: { $in: labelIds } }).session(session).lean() as any[];
-  if (new Set(labelIds).size !== labels.length) {
-    throw new Error("Incomplete backup; no replacement was made");
-  }
+  // Historical cross-account label deletion could leave a dangling reference.
+  // Expose the unavailable ID so the owner can resubmit its local encrypted
+  // record through an explicit revisioned repair, without returning an
+  // incomplete image as a valid recovery.
+  const foundLabelIds = new Set(labels.map(label => label.id));
+  const unavailableLabelIds = labelIds.filter(id => !foundLabelIds.has(id)).sort();
   const records = {
     appId, generation: app ? {identity:String(app._id),version:app.backupGeneration || 0} : null,
     wallets: appImage.wallets || {}, signers: appImage.signers || {}, nodes: appImage.nodes || [],
     vaults: allVaultImages.map(v => ({ vaultId: v.vaultId, vault: v.vault, appId: v.appId, isArchived: !!v.isArchived })).sort((a,b) => a.vaultId.localeCompare(b.vaultId)),
     unavailableVaultIds,
     labels: labels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
+    unavailableLabelIds,
   };
   const revision = createHash("sha256").update(canonical(records)).digest("hex");
-  return { appImage, allVaultImages, unavailableVaultIds, labels, revision, exists: !!app };
+  return { appImage, allVaultImages, unavailableVaultIds, labels, unavailableLabelIds, revision, exists: !!app };
 }
 
 let scopedVaultInitialization: Promise<unknown>;
@@ -440,6 +444,10 @@ async function writeBackup(data: any, legacy: boolean, activateIncrementalFence 
     const current = await snapshot(data.appId, session);
     if (legacy && current.appImage.backupRevisionRequired) throw new BackupUpgradeRequired();
     if (current.revision !== data.expectedRevision) throw new BackupConflict();
+    // A missing historical label can only be restored by supplying its exact
+    // referenced ID. A replacement request must not silently discard it.
+    if (current.unavailableLabelIds.some(id => !data.labels.some((label: any) => label.id === id)))
+      throw new BackupConflict();
     const includesAll = (oldIds: string[], newIds: string[]) => oldIds.every(id => newIds.includes(id));
     // Only an explicit, revisioned repair may remove records. Old full writers
     // still fail closed, including transaction retries after a newer repair.
@@ -507,6 +515,7 @@ export async function backupLegacyApp(data: any) {
   const current = await getBackupSnapshot(data.appId);
   if (current.appImage.backupRevisionRequired) throw new BackupUpgradeRequired();
   if (current.unavailableVaultIds.length) throw new BackupConflict();
+  if (current.unavailableLabelIds.length) throw new BackupConflict();
   const vaultObject = Object.create(null);
   for (const [id, value] of Object.entries(data.vaultObject || {}) as [string, any][]) {
     vaultObject[id] = { ...value, vaultId:id,

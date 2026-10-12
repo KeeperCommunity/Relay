@@ -250,7 +250,8 @@ export const getVaultImage = async (vaultId) => {
 
 export const getAppImage = async (appId, appversion) => {
   const snapshot = await getBackupSnapshot(appId);
-  if (snapshot.unavailableVaultIds.length) throw new Error("Recovery data unavailable");
+  if (snapshot.unavailableVaultIds.length || snapshot.unavailableLabelIds.length)
+    throw new Error("Recovery data unavailable");
   const appImage = snapshot.exists
     ? snapshot.appImage
     : { ...snapshot.appImage, version: appversion };
