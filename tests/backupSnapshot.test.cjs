@@ -167,6 +167,26 @@ test('legacy full backup cannot silently replace a dangling label reference',asy
  await assert.rejects(legacy.backupAllSignersAndVaults(p),/Backup changed/);
  assert.deepEqual((await service.getBackupSnapshot(p.appId)).unavailableLabelIds,['legacy-missing-label']);
 });
+test('historical shared label reference withholds ambiguous ciphertext from both accounts',async()=>{
+ const first=await payload('historical-label-first');
+ first.labels=[{id:'historical-shared-label',content:'first-owner-ciphertext'}];
+ await service.repairAppBackup(first);
+ const second=await payload('historical-label-second');
+ await service.repairAppBackup(second);
+ // Simulate an older endpoint attaching the same global label ID to another
+ // account. Its ciphertext has no trustworthy per-account owner metadata.
+ await app.updateOne({appId:second.appId},{$addToSet:{labels:'historical-shared-label'}});
+ for(const account of [first,second]){
+  const snapshot=await service.getBackupSnapshot(account.appId);
+  assert.deepEqual(snapshot.unavailableLabelIds,['historical-shared-label']);
+  assert.deepEqual(snapshot.labels,[]);
+  await assert.rejects(legacy.getAppImage(account.appId,'2.5.16'),/Recovery data unavailable/);
+ }
+ const firstSnapshot=await service.getBackupSnapshot(first.appId);
+ await assert.rejects(service.repairAppBackup({...first,
+  expectedRevision:firstSnapshot.revision,replaceCurrentState:true},true),service.BackupConflict);
+ assert.equal((await label.findOne({id:'historical-shared-label'}).lean()).content,'first-owner-ciphertext');
+});
 test('malformed encrypted payload cannot create records',async()=>{
  const p=await payload('invalid');p.nodes=[{}];await assert.rejects(service.repairAppBackup(p),/Invalid encrypted node/);assert.equal(await app.countDocuments({appId:'invalid'}),0);
 });

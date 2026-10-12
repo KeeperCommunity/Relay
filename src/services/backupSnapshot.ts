@@ -52,22 +52,32 @@ async function snapshot(appId: string, session: mongoose.ClientSession) {
   const labelIds = appImage.labels || [];
   const { allVaultImages, unavailableVaultIds } = await accountVaultImages(appId, vaultIds, session);
   const labels = await db.getLabelModel().find({ id: { $in: labelIds } }).session(session).lean() as any[];
+  const peerReferences = await db.getAppImageModel().find({
+    appId:{$ne:appId}, labels:{$in:labelIds},
+  }).session(session).lean() as any[];
+  const requestedLabelIds = new Set(labelIds);
+  const sharedLabelIds = new Set<string>();
+  for (const peer of peerReferences) for (const id of peer.labels || [])
+    if (requestedLabelIds.has(id)) sharedLabelIds.add(id);
   // Historical cross-account label deletion could leave a dangling reference.
-  // Expose the unavailable ID so the owner can resubmit its local encrypted
-  // record through an explicit revisioned repair, without returning an
-  // incomplete image as a valid recovery.
+  // A historical shared reference is also ambiguous: the global ciphertext
+  // cannot be attributed to either account. Withhold it from both recoveries.
+  // A uniquely owned missing label can be resubmitted by its owner, while a
+  // shared ID requires an operator migration with ownership evidence.
   const foundLabelIds = new Set(labels.map(label => label.id));
-  const unavailableLabelIds = labelIds.filter(id => !foundLabelIds.has(id)).sort();
+  const unavailableLabelIds = labelIds.filter(id =>
+    !foundLabelIds.has(id) || sharedLabelIds.has(id)).sort();
+  const availableLabels = labels.filter(label => !sharedLabelIds.has(label.id));
   const records = {
     appId, generation: app ? {identity:String(app._id),version:app.backupGeneration || 0} : null,
     wallets: appImage.wallets || {}, signers: appImage.signers || {}, nodes: appImage.nodes || [],
     vaults: allVaultImages.map(v => ({ vaultId: v.vaultId, vault: v.vault, appId: v.appId, isArchived: !!v.isArchived })).sort((a,b) => a.vaultId.localeCompare(b.vaultId)),
     unavailableVaultIds,
-    labels: labels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
+    labels: availableLabels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
     unavailableLabelIds,
   };
   const revision = createHash("sha256").update(canonical(records)).digest("hex");
-  return { appImage, allVaultImages, unavailableVaultIds, labels, unavailableLabelIds, revision, exists: !!app };
+  return { appImage, allVaultImages, unavailableVaultIds, labels:availableLabels, unavailableLabelIds, revision, exists: !!app };
 }
 
 let scopedVaultInitialization: Promise<unknown>;
