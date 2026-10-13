@@ -49,7 +49,8 @@ after(async () => { if (fixture) await fixture.close(); });
 async function baseline(operation, suffix) {
   await fixture.reset();
   const appId = `synthetic-${operation}-${suffix}`;
-  const snapshot = await fixture.seed({ appId, walletObject: { wallet: cipher(wallet),
+  const snapshot = await fixture.seed({ appId, subscription: JSON.stringify({ level: 1, isCancelled: false }),
+    walletObject: { wallet: cipher(wallet),
     remote: cipher({ id: 'remote', name: 'remote-only', networkType: 'TESTNET' }) },
     signersObject: { 'old-key': cipher(signer) },
     vaultObject: { vault: { vaultId: 'vault', vault: cipher(vault), isArchived: false, signersData: [] } },
@@ -91,7 +92,7 @@ for (const operation of Object.keys(operations)) {
     await fixture.post('revisionedBackupMutation', input.body, 409);
     assert.equal((await fixture.snapshot(input.appId)).revision, snapshot.revision);
   });
-  for (const mode of ['409', '404', 'malformed', 'lost-reply']) {
+  for (const mode of ['409', '404', 'malformed', 'equal-old-ack', 'lost-reply']) {
     test(`${operation}: ${mode} uses actual transaction outcome without fake CAS success`, async () => {
       const input = await baseline(operation, mode);
       fixture.armFault({ mode, operation });
@@ -101,6 +102,7 @@ for (const operation of Object.keys(operations)) {
           mode === '409' ? 409 : mode === '404' ? 404 : 200);
         if (mode === '409') assert.equal(result.data.error, 'BACKUP_CHANGED');
         if (mode === 'malformed') assert.equal(result.data.newRevision, 'invalid');
+        if (mode === 'equal-old-ack') assert.equal(result.data.newRevision, input.snapshot.revision);
       }
       const snapshot = await fixture.snapshot(input.appId);
       const attempts = fixture.trace.filter(entry => entry.path === '/revisionedBackupMutation');
@@ -156,3 +158,25 @@ test('snapshot reply barrier permits a real peer transaction after read and befo
   await fixture.post('revisionedBackupMutation', input.body, 409);
   assert.equal((await fixture.snapshot(input.appId)).revision, actual.revision);
 });
+
+test('seed preserves subscription metadata through the actual revisioned repair', async () => {
+  const input = await baseline('updateAppImage', 'metadata');
+  assert.deepEqual(JSON.parse(input.snapshot.appImage.subscription), { level: 1, isCancelled: false });
+  assert.equal(input.snapshot.appImage.publicId, `public-${input.appId}`);
+  assert.equal(input.snapshot.appImage.version, '2.6.4');
+});
+
+for (const [field, value] of Object.entries({ publicId: 'synthetic-other-public-id',
+  version: 'stale-fixture-version', subscription: '{"level":999}' })) {
+  test(`snapshot ${field} metadata fault changes only delivery after a real transactional read`, async () => {
+    const input = await baseline('updateAppImage', `malformed-${field}`);
+    fixture.armFault({ mode: 'malformed-metadata', metadata: { [field]: value } });
+    const malformed = await fixture.snapshot(input.appId);
+    assert.equal(malformed.appImage[field], value);
+    assert.equal(malformed.revision, input.snapshot.revision);
+    const actual = await fixture.snapshot(input.appId);
+    assert.equal(actual.appImage[field], input.snapshot.appImage[field]);
+    assert.equal(actual.revision, input.snapshot.revision);
+    assert.equal(actual.appImage.wallets.wallet, input.snapshot.appImage.wallets.wallet);
+  });
+}

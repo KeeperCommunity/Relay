@@ -104,7 +104,7 @@ async function createFixture(options = {}) {
         appId: req.body?.appId, routeInvoked: false, committed: false };
       trace.push(entry);
       const index = faults.findIndex(fault => {
-        const target = fault.path || (fault.mode === 'before-snapshot-reply'
+        const target = fault.path || (['before-snapshot-reply', 'malformed-metadata'].includes(fault.mode)
           ? '/getBackupSnapshot' : '/revisionedBackupMutation');
         return target === req.path && (!fault.operation || fault.operation === entry.operation)
           && (!fault.appId || fault.appId === entry.appId);
@@ -116,11 +116,14 @@ async function createFixture(options = {}) {
       }
       if (req.path === '/getBackupSnapshot') {
         entry.routeInvoked = true;
-        if (fault?.mode === 'before-snapshot-reply') {
+        if (fault?.mode === 'before-snapshot-reply' || fault?.mode === 'malformed-metadata') {
           const originalJson = res.json.bind(res);
           res.json = body => {
             Promise.resolve().then(() => fault.beforeReply?.({ body, db, service, bhr }))
-              .then(() => originalJson(body)).catch(next);
+              .then(() => originalJson(fault.mode === 'malformed-metadata'
+                ? { ...body, appImage: { ...body.appImage,
+                  ...(fault.metadata || { publicId: 'synthetic-metadata-mismatch' }) } }
+                : body)).catch(next);
             return res;
           };
         }
@@ -135,6 +138,8 @@ async function createFixture(options = {}) {
         entry.committed = res.statusCode === 200 && body.updated === true;
         if (entry.committed && fault?.mode === 'malformed') return originalJson({ updated: true,
           preconditionApplied: true, newRevision: 'invalid' });
+        if (entry.committed && fault?.mode === 'equal-old-ack') return originalJson({ updated: true,
+          preconditionApplied: true, newRevision: req.body.expectedRevision });
         if (entry.committed && fault?.mode === 'lost-reply') { req.socket.destroy(); return res; }
         if (entry.committed && fault?.mode === 'delay-reply') {
           const timer = setTimeout(() => {
@@ -179,8 +184,8 @@ async function createFixture(options = {}) {
     return {
       url, database, trace, db, service, bhr, post, snapshot,
       armFault(fault) {
-        assert.ok(['404', '409', 'malformed', 'lost-reply', 'delay-reply',
-          'before-snapshot-reply', undefined].includes(fault.mode));
+        assert.ok(['404', '409', 'malformed', 'equal-old-ack', 'lost-reply', 'delay-reply',
+          'before-snapshot-reply', 'malformed-metadata', undefined].includes(fault.mode));
         faults.push(fault);
       },
       clearTrace() { trace.length = 0; },
@@ -194,7 +199,8 @@ async function createFixture(options = {}) {
         const labels = (input.labels || []).map(label => ({ id: label.id,
           content: label.content ?? label.encryptedLabel }));
         const repair = { appId, publicId: image.publicId || `public-${appId}`,
-          version: image.version || '2.6.4', expectedRevision: current.revision,
+          version: image.version || '2.6.4', subscription: image.subscription,
+          expectedRevision: current.revision,
           walletObject: input.walletObject || image.wallets || {},
           signersObject: input.signersObject || image.signers || {},
           vaultObject, nodes: input.nodes || image.nodes || [], labels,
