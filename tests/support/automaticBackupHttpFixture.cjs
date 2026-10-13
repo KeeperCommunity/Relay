@@ -56,7 +56,7 @@ function registerProductionRoutes(router, dependencies) {
   const text = fs.readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, text, ts.ScriptTarget.Latest, true);
   const selected = [];
-  const required = new Set(['/getBackupSnapshot', '/revisionedBackupMutation']);
+  const required = new Set(['/getBackupSnapshot', '/revisionedBackupMutation', '/getAppImage']);
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === 'sendBackupMutationError') selected.push(node.getText(tree));
     if (ts.isCallExpression(node) && node.expression.getText(tree) === 'router.post' && required.has(node.arguments[0]?.text)) {
@@ -104,7 +104,7 @@ async function createFixture(options = {}) {
         appId: req.body?.appId, routeInvoked: false, committed: false };
       trace.push(entry);
       const index = faults.findIndex(fault => {
-        const target = fault.path || (['before-snapshot-reply', 'malformed-metadata'].includes(fault.mode)
+        const target = fault.path || (['before-snapshot-reply', 'malformed-metadata', 'malformed-json'].includes(fault.mode)
           ? '/getBackupSnapshot' : '/revisionedBackupMutation');
         return target === req.path && (!fault.operation || fault.operation === entry.operation)
           && (!fault.appId || fault.appId === entry.appId);
@@ -116,14 +116,18 @@ async function createFixture(options = {}) {
       }
       if (req.path === '/getBackupSnapshot') {
         entry.routeInvoked = true;
+        if (fault?.mode === 'malformed-json') {
+          res.json = () => res.type('application/json').send('{');
+          return next();
+        }
         if (fault?.mode === 'before-snapshot-reply' || fault?.mode === 'malformed-metadata') {
           const originalJson = res.json.bind(res);
           res.json = body => {
             Promise.resolve().then(() => fault.beforeReply?.({ body, db, service, bhr }))
-              .then(() => originalJson(fault.mode === 'malformed-metadata'
+              .then(changed => originalJson(fault.mode === 'malformed-metadata'
                 ? { ...body, appImage: { ...body.appImage,
                   ...(fault.metadata || { publicId: 'synthetic-metadata-mismatch' }) } }
-                : body)).catch(next);
+                : changed ?? body)).catch(next);
             return res;
           };
         }
@@ -168,13 +172,14 @@ async function createFixture(options = {}) {
     registerProductionRoutes(router, { bhr, ...service });
     const app = express();
     app.use(express.json({ limit: '50mb' }));
+    app.use(loader.load('src/localDevelopment.ts').localDevelopmentRoutes);
     app.use(router);
     app.use((_error, _req, res, _next) => res.status(503).json({ updated: false, error: 'FIXTURE_FAILED' }));
     server = await new Promise(resolve => { const instance = app.listen(0, '127.0.0.1', () => resolve(instance)); });
     const url = `http://127.0.0.1:${server.address().port}/`;
-    const post = async (endpoint, body, expectedStatus = 200) => {
+    const post = async (endpoint, body, expectedStatus = 200, headers = {}) => {
       const response = await fetch(new URL(endpoint, url), { method: 'POST',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        headers: { 'Content-Type': 'application/json', appversion: '2.6.4', ...headers }, body: JSON.stringify(body) });
       const data = await response.json();
       if (expectedStatus !== undefined) assert.equal(response.status, expectedStatus,
         `Expected ${expectedStatus}, got ${response.status} on ${endpoint}: ${JSON.stringify(data)}`);
@@ -185,11 +190,24 @@ async function createFixture(options = {}) {
       url, database, trace, db, service, bhr, post, snapshot,
       armFault(fault) {
         assert.ok(['404', '409', 'malformed', 'equal-old-ack', 'lost-reply', 'delay-reply',
-          'before-snapshot-reply', 'malformed-metadata', undefined].includes(fault.mode));
+          'before-snapshot-reply', 'malformed-metadata', 'malformed-json', undefined].includes(fault.mode));
         faults.push(fault);
       },
       clearTrace() { trace.length = 0; },
       async reset() { faults.length = 0; trace.length = 0; await Promise.all(models.map(model => model.deleteMany({}))); },
+      async prepareRestore(appId) {
+        const current = await snapshot(appId);
+        assert.equal(current.exists, true, 'Seed an encrypted backup before restore');
+        // Actual free-tier App record makes production receipt validation take
+        // its normal no-provider branch. This is fixture setup, not a mocked
+        // subscription response or an automatic-write endpoint fallback.
+        const { PlebSubscription } = loader.load('src/interface.ts');
+        await db.getAppModel().updateOne({ appId }, { $set: {
+          _id: `fixture-${appId}`, appId, publicId: current.appImage.publicId,
+          os: 'android', version: current.appImage.version,
+          subscription: PlebSubscription,
+        } }, { upsert: true, runValidators: true });
+      },
       async seed(input) {
         const image = input.appImage || input;
         const appId = image.appId;

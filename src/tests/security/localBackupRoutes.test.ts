@@ -7,15 +7,18 @@ it("allows disposable backup routes while hosted integrations remain unavailable
   app.use(express.json(), localDevelopmentRoutes);
   app.post("/getBackupSnapshot", (_req, res) => res.json({ revision: "synthetic-revision" }));
   app.post("/repairAppBackup", (_req, res) => res.json({ updated: true }));
+  app.post("/revisionedBackupMutation", (_req, res) => res.json({ reachedRevisionedRoute: true }));
   app.post("/offer", (_req, res) => res.json({ shouldNotReachProvider: true }));
   const server = await new Promise<ReturnType<typeof app.listen>>(resolve => {
     const listener = app.listen(0, "127.0.0.1", () => resolve(listener));
   });
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
-    for (const route of ["getBackupSnapshot", "repairAppBackup"]) {
+    for (const route of ["getBackupSnapshot", "repairAppBackup", "revisionedBackupMutation"]) {
       const response = await fetch(`${baseUrl}/${route}`, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
       expect(response.status).toBe(200);
+      if (route === "revisionedBackupMutation")
+        expect((await response.json()).reachedRevisionedRoute).toBe(true);
     }
     const response = await fetch(`${baseUrl}/offer`, { method: "POST" });
     expect(response.status).toBe(503);

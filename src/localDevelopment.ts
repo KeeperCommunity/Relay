@@ -27,7 +27,7 @@ const localDatabaseRoutes = new Set([
   "/getvaultmetadata", "/getsigneridinfo", "/migratexfps", "/modifylabels",
   "/getmessages", "/getsubscriptiondetails", "/updatecontactskey",
   "/createremotekey", "/getremotekey", "/backupallsignersandvaults",
-  "/getbackupsnapshot", "/repairappbackup",
+  "/getbackupsnapshot", "/repairappbackup", "/revisionedbackupmutation",
   "/deletebackup", "/updatecollaborativechannel", "/fetchcollaborativechannel",
   "/gethardwarereferrallinks", "/getactivecampaign", "/getadvisors",
 ]);

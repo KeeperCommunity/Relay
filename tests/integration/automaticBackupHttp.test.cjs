@@ -180,3 +180,47 @@ for (const [field, value] of Object.entries({ publicId: 'synthetic-other-public-
     assert.equal(actual.appImage.wallets.wallet, input.snapshot.appImage.wallets.wallet);
   });
 }
+
+test('actual legacy restore read preserves encrypted records and does not authorize a legacy write', async () => {
+  const input = await baseline('updateAppImage', 'clean-restore-read');
+  await fixture.prepareRestore(input.appId);
+  fixture.clearTrace();
+  const recovered = (await fixture.post('getAppImage', { appId: input.appId })).data;
+  assert.equal(recovered.appImage.appId, input.appId);
+  assert.equal(decode(recovered.appImage.wallets.wallet).name, 'before');
+  assert.equal(decode(recovered.appImage.signers['old-key']).masterFingerprint, 'aabbccdd');
+  assert.equal(decode(recovered.allVaultImages[0].vault).id, 'vault');
+  assert.equal(decode(recovered.labels[0].content).id, 'tag');
+  assert.equal(recovered.subscription.level, 1);
+  assert.equal((await fixture.snapshot(input.appId)).revision, input.snapshot.revision);
+  assert.equal(fixture.trace.some(entry => entry.path === '/revisionedBackupMutation'), false);
+  await fixture.post('getAppImage', { appId: input.appId }, 400, { appversion: '' });
+});
+
+for (const fault of ['invalid-reference', 'unavailable', 'malformed-shape']) {
+  test(`snapshot ${fault} hook changes only wire data after actual transaction`, async () => {
+    const input = await baseline('updateAppImage', fault);
+    fixture.armFault({ mode: 'before-snapshot-reply', beforeReply: ({ body }) => {
+      if (fault === 'invalid-reference') body.appImage.vaults.push('synthetic-missing-vault');
+      if (fault === 'unavailable') body.unavailableLabelIds = ['synthetic-unavailable-label'];
+      return fault === 'malformed-shape' ? 'synthetic-invalid-snapshot' : body;
+    } });
+    const altered = await fixture.snapshot(input.appId);
+    if (fault === 'invalid-reference') assert.ok(altered.appImage.vaults.includes('synthetic-missing-vault'));
+    if (fault === 'unavailable') assert.equal(altered.unavailableLabelIds.length, 1);
+    if (fault === 'malformed-shape') assert.equal(typeof altered, 'string');
+    const actual = await fixture.snapshot(input.appId);
+    assert.equal(actual.revision, input.snapshot.revision);
+    assert.deepEqual(actual.appImage.vaults, ['vault']);
+    assert.deepEqual(actual.unavailableLabelIds, []);
+  });
+}
+
+test('invalid JSON bytes fail at the response boundary after the actual snapshot read', async () => {
+  const input = await baseline('updateAppImage', 'malformed-json');
+  fixture.armFault({ mode: 'malformed-json' });
+  await assert.rejects(fixture.snapshot(input.appId), SyntaxError);
+  const actual = await fixture.snapshot(input.appId);
+  assert.equal(actual.revision, input.snapshot.revision);
+  assert.equal(actual.appImage.wallets.wallet, input.snapshot.appImage.wallets.wallet);
+});
