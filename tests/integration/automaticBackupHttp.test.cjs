@@ -224,3 +224,25 @@ test('invalid JSON bytes fail at the response boundary after the actual snapshot
   assert.equal(actual.revision, input.snapshot.revision);
   assert.equal(actual.appImage.wallets.wallet, input.snapshot.appImage.wallets.wallet);
 });
+
+for (const [name, acknowledgement] of Object.entries({
+  'negative-updated': { updated: false },
+  'missing-precondition': { updated: true },
+  'missing-revision': { updated: true, preconditionApplied: true },
+  'null-body': null,
+})) {
+  test(`malformed ${name} acknowledgement follows a real commit without replacing its trace`, async () => {
+    const input = await baseline('updateAppImage', name);
+    fixture.armFault({ mode: 'malformed', acknowledgement });
+    const reply = await fixture.post('revisionedBackupMutation', input.body);
+    assert.deepEqual(reply.data, acknowledgement);
+    const actual = await fixture.snapshot(input.appId);
+    checkEffect('updateAppImage', actual);
+    assert.notEqual(actual.revision, input.snapshot.revision);
+    const trace = fixture.trace.find(entry => entry.path === '/revisionedBackupMutation');
+    assert.equal(trace.committed, true);
+    assert.equal(trace.response.updated, true);
+    assert.equal(trace.response.preconditionApplied, true);
+    assert.equal(trace.response.newRevision, actual.revision);
+  });
+}

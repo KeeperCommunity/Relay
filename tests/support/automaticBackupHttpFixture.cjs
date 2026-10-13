@@ -140,8 +140,10 @@ async function createFixture(options = {}) {
         entry.status = res.statusCode;
         entry.response = body;
         entry.committed = res.statusCode === 200 && body.updated === true;
-        if (entry.committed && fault?.mode === 'malformed') return originalJson({ updated: true,
-          preconditionApplied: true, newRevision: 'invalid' });
+        if (entry.committed && fault?.mode === 'malformed') return originalJson(
+          Object.prototype.hasOwnProperty.call(fault, 'acknowledgement')
+            ? fault.acknowledgement
+            : { updated: true, preconditionApplied: true, newRevision: 'invalid' });
         if (entry.committed && fault?.mode === 'equal-old-ack') return originalJson({ updated: true,
           preconditionApplied: true, newRevision: req.body.expectedRevision });
         if (entry.committed && fault?.mode === 'lost-reply') { req.socket.destroy(); return res; }
