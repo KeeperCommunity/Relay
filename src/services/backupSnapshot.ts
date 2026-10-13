@@ -52,18 +52,32 @@ async function snapshot(appId: string, session: mongoose.ClientSession) {
   const labelIds = appImage.labels || [];
   const { allVaultImages, unavailableVaultIds } = await accountVaultImages(appId, vaultIds, session);
   const labels = await db.getLabelModel().find({ id: { $in: labelIds } }).session(session).lean() as any[];
-  if (new Set(labelIds).size !== labels.length) {
-    throw new Error("Incomplete backup; no replacement was made");
-  }
+  const peerReferences = await db.getAppImageModel().find({
+    appId:{$ne:appId}, labels:{$in:labelIds},
+  }, {labels:1}).session(session).lean() as any[];
+  const requestedLabelIds = new Set(labelIds);
+  const sharedLabelIds = new Set<string>();
+  for (const peer of peerReferences) for (const id of peer.labels || [])
+    if (requestedLabelIds.has(id)) sharedLabelIds.add(id);
+  // Historical cross-account label deletion could leave a dangling reference.
+  // A historical shared reference is also ambiguous: the global ciphertext
+  // cannot be attributed to either account. Withhold it from both recoveries.
+  // A uniquely owned missing label can be resubmitted by its owner, while a
+  // shared ID requires an operator migration with ownership evidence.
+  const foundLabelIds = new Set(labels.map(label => label.id));
+  const unavailableLabelIds = labelIds.filter(id =>
+    !foundLabelIds.has(id) || sharedLabelIds.has(id)).sort();
+  const availableLabels = labels.filter(label => !sharedLabelIds.has(label.id));
   const records = {
     appId, generation: app ? {identity:String(app._id),version:app.backupGeneration || 0} : null,
     wallets: appImage.wallets || {}, signers: appImage.signers || {}, nodes: appImage.nodes || [],
     vaults: allVaultImages.map(v => ({ vaultId: v.vaultId, vault: v.vault, appId: v.appId, isArchived: !!v.isArchived })).sort((a,b) => a.vaultId.localeCompare(b.vaultId)),
     unavailableVaultIds,
-    labels: labels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
+    labels: availableLabels.map(l => ({ id:l.id, content:l.content })).sort((a,b) => a.id.localeCompare(b.id)),
+    unavailableLabelIds,
   };
   const revision = createHash("sha256").update(canonical(records)).digest("hex");
-  return { appImage, allVaultImages, unavailableVaultIds, labels, revision, exists: !!app };
+  return { appImage, allVaultImages, unavailableVaultIds, labels:availableLabels, unavailableLabelIds, revision, exists: !!app };
 }
 
 let scopedVaultInitialization: Promise<unknown>;
@@ -106,16 +120,52 @@ async function inTransaction<T>(work: (session: mongoose.ClientSession) => Promi
   } finally { await session.endSession(); }
 }
 
-async function advanceBackupGeneration(appId: string, session: mongoose.ClientSession) {
-  await db.getAppImageModel().updateOne({appId}, {$inc:{backupGeneration:1}}, {session});
+async function advanceBackupGeneration(appId: string, session: mongoose.ClientSession, revisionedIncremental = false) {
+  await db.getAppImageModel().updateOne({appId}, {
+    $inc:{backupGeneration:1},
+    ...(revisionedIncremental ? {$set:{incrementalRevisionRequired:true}} : {}),
+  }, {session});
 }
 
 // Legacy incremental writes also share the transaction/generation boundary.
-export async function withBackupMutation<T>(appId: string, work: (session: mongoose.ClientSession) => Promise<T>) {
+export async function assertBackupMutationRevision(
+  appId: string,
+  expectedRevision: string | undefined,
+  session: mongoose.ClientSession
+) {
+  if (expectedRevision !== undefined && !/^[a-f0-9]{64}$/.test(expectedRevision))
+    throw new InvalidBackupRequest("Invalid backup revision");
+  if (expectedRevision === undefined) {
+    const current = await db.getAppImageModel().findOne({appId}).session(session).lean() as any;
+    if (current?.incrementalRevisionRequired) throw new BackupUpgradeRequired();
+    return false;
+  }
+  const current = await snapshot(appId, session);
+  if (current.revision !== expectedRevision) throw new BackupConflict();
+  return true;
+}
+
+export async function withBackupMutation<T>(
+  appId: string,
+  work: (session: mongoose.ClientSession) => Promise<T>,
+  expectedRevision?: string,
+  revisionedIncremental = false
+) {
   assertAccountId(appId);
   return inTransaction(async session => {
+    await assertBackupMutationRevision(appId, expectedRevision, session);
     const result = await work(session);
-    if (result !== false && (!result || (result as any).updated !== false)) await advanceBackupGeneration(appId, session);
+    if (result !== false && (!result || (result as any).updated !== false)) {
+      await advanceBackupGeneration(appId, session, revisionedIncremental && expectedRevision !== undefined);
+      // Compute the token before committing. A separate read after the commit
+      // could observe another device's write and let stale ciphertext rebase.
+      if (revisionedIncremental && expectedRevision !== undefined) {
+        const newRevision = (await snapshot(appId, session)).revision;
+        return (result && typeof result === "object"
+          ? { ...result, newRevision }
+          : { updated: true, newRevision }) as T;
+      }
+    }
     return result;
   });
 }
@@ -142,7 +192,7 @@ export async function getAppBackupVaultImages(appId: string, vaultIds: string[])
 
 // Incremental deletion removes only the requested IDs. Never save a previously
 // read wallet/key map: a delayed deletion must preserve a newer repair or save.
-export async function deleteBackupEntities(appId: string, wallets?: string[], signers?: string[]) {
+export async function deleteBackupEntities(appId: string, wallets?: string[], signers?: string[], expectedRevision?: string) {
   if (typeof appId !== "string" || !appId) throw new InvalidBackupRequest("Invalid backup account");
   const safeIds = (ids: unknown) => ids == null || (Array.isArray(ids) && ids.every(id =>
     typeof id === "string" && id.length > 0 && id.length <= 512 && !/[.$]/.test(id) &&
@@ -150,6 +200,7 @@ export async function deleteBackupEntities(appId: string, wallets?: string[], si
   ));
   if (!safeIds(wallets) || !safeIds(signers)) throw new InvalidBackupRequest("Invalid backup record IDs");
   return inTransaction(async session => {
+    const revisioned = await assertBackupMutationRevision(appId, expectedRevision, session);
     const app = await db.getAppImageModel().findOne({ appId }).session(session).lean();
     if (!app) return { updated: false, error: "No app image" };
     const removals: Record<string, string> = {};
@@ -157,9 +208,10 @@ export async function deleteBackupEntities(appId: string, wallets?: string[], si
     for (const id of signers || []) removals[`signers.${id}`] = "";
     if (Object.keys(removals).length) {
       const result = await db.getAppImageModel().updateOne({ appId }, { $unset: removals }, { session });
-      if (result.modifiedCount) await advanceBackupGeneration(appId, session);
+      if (result.modifiedCount || revisioned) await advanceBackupGeneration(appId, session, revisioned);
     }
-    return { updated: true, error: "" };
+    else if (revisioned) await advanceBackupGeneration(appId, session, true);
+    return { updated: true, error: "", ...(revisioned ? {newRevision:(await snapshot(appId, session)).revision} : {}) };
   });
 }
 
@@ -299,6 +351,7 @@ export async function saveBackupVault(data: any) {
     }
     const appId = data.appId || legacy?.appId;
     if (typeof appId !== "string" || !appId) throw new InvalidBackupRequest("Backup account missing");
+    const revisioned = await assertBackupMutationRevision(appId, data.expectedRevision, session);
     const existing = (await accountVaultImages(appId, [data.vaultId], session)).allVaultImages[0];
     if (data.isUpdate && !existing) return {updated:false,error:"No vault image"};
     const app = await db.getAppImageModel().findOne({ appId }).session(session).lean();
@@ -320,12 +373,12 @@ export async function saveBackupVault(data: any) {
     const retainedIds = isArchived ? [] : signersData === undefined ? (existing?.signerIds || []) : signersData.map(s => s.signerId);
     await pruneRemovedVaultMaps(data.vaultId, (existing?.signerIds || []).filter(id => !retainedIds.includes(id)), session);
     await db.getAppImageModel().updateOne({ appId }, { $addToSet: { vaults: data.vaultId } }, { session });
-    await advanceBackupGeneration(appId, session);
-    return { updated: true, error: "" };
+    await advanceBackupGeneration(appId, session, revisioned);
+    return { updated: true, error: "", ...(revisioned ? {newRevision:(await snapshot(appId, session)).revision} : {}) };
   });
 }
 
-export async function deleteBackupVaults(appId: string, vaultIds: string[]) {
+export async function deleteBackupVaults(appId: string, vaultIds: string[], expectedRevision?: string) {
   if (typeof appId !== "string" || !appId || !Array.isArray(vaultIds) || vaultIds.some(id => !validRecordId(id)))
     throw new InvalidBackupRequest("Invalid vault deletion");
   return withBackupMutation(appId, async session => {
@@ -341,13 +394,13 @@ export async function deleteBackupVaults(appId: string, vaultIds: string[]) {
     await removeAccountVaults(appId, authorizedIds, session);
     await db.getAppImageModel().updateOne({ appId }, { $pull: { vaults: { $in: vaultIds } } }, { session });
     return { updated: true };
-  });
+  }, expectedRevision, true);
 }
 
 // The user's explicit "Delete" choice clears the encrypted backup while
 // retaining the app identity and subscription record. All related records
 // change together, so a failed delete cannot leave a partial backup behind.
-export async function deleteAppBackup(appId: string) {
+export async function deleteAppBackup(appId: string, expectedRevision?: string) {
   if (typeof appId !== "string" || !appId) throw new InvalidBackupRequest("Invalid backup account");
   return withBackupMutation(appId, async session => {
     const app = await db.getAppImageModel().findOne({ appId }).session(session).lean() as any;
@@ -366,7 +419,7 @@ export async function deleteAppBackup(appId: string) {
       wallets: {}, signers: {}, nodes: [], vaults: [], labels: [],
     } }, { session });
     return { updated: true, error: "" };
-  });
+  }, expectedRevision, true);
 }
 
 function assertPayload(data: any) {
@@ -391,16 +444,20 @@ function assertPayload(data: any) {
 // This endpoint never silently falls back to the legacy destructive replacement.
 // Transactions atomically update the referenced records and app image. On a
 // concurrent-write retry, the token is checked again against the new snapshot.
-export async function repairAppBackup(data: any) {
-  return writeBackup(data, false);
+export async function repairAppBackup(data: any, activateIncrementalFence = false) {
+  return writeBackup(data, false, activateIncrementalFence);
 }
 
-async function writeBackup(data: any, legacy: boolean) {
+async function writeBackup(data: any, legacy: boolean, activateIncrementalFence = false) {
   assertPayload(data);
   return withBackupMutation(data.appId, async session => {
     const current = await snapshot(data.appId, session);
     if (legacy && current.appImage.backupRevisionRequired) throw new BackupUpgradeRequired();
     if (current.revision !== data.expectedRevision) throw new BackupConflict();
+    // A missing historical label can only be restored by supplying its exact
+    // referenced ID. A replacement request must not silently discard it.
+    if (current.unavailableLabelIds.some(id => !data.labels.some((label: any) => label.id === id)))
+      throw new BackupConflict();
     const includesAll = (oldIds: string[], newIds: string[]) => oldIds.every(id => newIds.includes(id));
     // Only an explicit, revisioned repair may remove records. Old full writers
     // still fail closed, including transaction retries after a newer repair.
@@ -450,13 +507,18 @@ async function writeBackup(data: any, legacy: boolean) {
     }
     // Updating this document also makes concurrent membership edits conflict
     // with the transaction instead of being lost in a full-snapshot write.
+    // A new account already has an empty AppImage from createNewApp. Its first
+    // explicit repair must persist the recovery subscription on that image,
+    // not only when an AppImage is inserted by this write.
+    const subscription = typeof data.subscription === "string" ? { subscription:data.subscription } : {};
     await db.getAppImageModel().updateOne({ appId:data.appId }, { $set:{
       wallets:data.walletObject, signers:data.signersObject, nodes:data.nodes,
       vaults:Object.keys(data.vaultObject), labels:data.labels.map(l => l.id), version:data.version,
       ...(!legacy ? { backupRevisionRequired:true } : {}),
-    }, $setOnInsert:{ appId:data.appId, publicId:data.publicId, subscription:data.subscription } }, {upsert:true,session});
+      ...(!legacy ? subscription : {}),
+    }, $setOnInsert:{ appId:data.appId, publicId:data.publicId, ...(legacy ? subscription : {}) } }, {upsert:true,session});
     return { updated:true };
-  });
+  }, legacy ? undefined : data.expectedRevision, activateIncrementalFence);
 }
 
 // Old clients have no revision token. Read their starting state, preserve archive
@@ -468,6 +530,7 @@ export async function backupLegacyApp(data: any) {
   const current = await getBackupSnapshot(data.appId);
   if (current.appImage.backupRevisionRequired) throw new BackupUpgradeRequired();
   if (current.unavailableVaultIds.length) throw new BackupConflict();
+  if (current.unavailableLabelIds.length) throw new BackupConflict();
   const vaultObject = Object.create(null);
   for (const [id, value] of Object.entries(data.vaultObject || {}) as [string, any][]) {
     vaultObject[id] = { ...value, vaultId:id,

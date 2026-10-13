@@ -77,6 +77,15 @@ const memoryStorage = multer.memoryStorage();
 const upload = multer({ memoryStorage });
 const screenshotUpload = multer({ storage: multer.memoryStorage() });
 
+function sendBackupMutationError(res: Response, error: unknown) {
+  const conflict = error instanceof BackupConflict;
+  const upgrade = error instanceof BackupUpgradeRequired;
+  return res.status(conflict || upgrade ? 409 : error instanceof InvalidBackupRequest ? 400 : 503).json({
+    updated: false,
+    error: conflict ? "BACKUP_CHANGED" : upgrade ? "BACKUP_UPGRADE_REQUIRED" : "BACKUP_NOT_UPDATED",
+  });
+}
+
 export default class Routes {
   public app: Express;
   constructor(app: Express) {
@@ -348,13 +357,11 @@ export default class Routes {
         const updated = await bhr.migrateXfp(
           req.body.appId,
           req.body.signerChanges,
+          req.body.expectedRevision,
         );
         res.status(200).json({ updated });
       } catch (err) {
-        res.status(400).json({
-          updated: false,
-          err: err.message,
-        });
+        sendBackupMutationError(res, err);
       }
     });
 
@@ -519,10 +526,11 @@ export default class Routes {
           hasField("signersObject") ? req.body.signersObject : req.body.signersObjects,
           req.body.nodes,
           req.body.replaceNodes === true,
+          req.body.expectedRevision,
         );
         res.status(200).json(result);
       } catch (err) {
-        res.status(400).json(err);
+        sendBackupMutationError(res, err);
       }
     });
 
@@ -535,10 +543,11 @@ export default class Routes {
           req.body.appId,
           req.body.walletIds,
           req.body.signers,
+          req.body.expectedRevision,
         );
         res.status(200).json(result);
       } catch (err) {
-        res.status(400).json(err);
+        sendBackupMutationError(res, err);
       }
     });
 
@@ -547,10 +556,10 @@ export default class Routes {
         return res.status(400).json({ err: "Input param missing - app's id" });
       }
       try {
-        const result = await bhr.deleteVaults(req.body.appId, req.body.vaults);
+        const result = await bhr.deleteVaults(req.body.appId, req.body.vaults, req.body.expectedRevision);
         res.status(200).json(result);
       } catch (err) {
-        res.status(400).json(err);
+        sendBackupMutationError(res, err);
       }
     });
 
@@ -566,6 +575,7 @@ export default class Routes {
             req.body.appId ?? req.body.appID,
             req.body.isArchived,
             req.body.signersData,
+            req.body.expectedRevision,
           );
           if (updated) {
             return res.status(200).json({
@@ -588,13 +598,11 @@ export default class Routes {
           req.body.subscription,
           req.body.archiveVaultId,
           req.body.isArchived,
+          req.body.expectedRevision,
         );
         res.status(200).json(result);
-      } catch {
-        res.status(400).json({
-          updated: false,
-          error: "Vault backup update failed",
-        });
+      } catch (error) {
+        sendBackupMutationError(res, error);
       }
     });
 
@@ -765,13 +773,11 @@ export default class Routes {
           req.body.appId,
           req.body?.addLabels,
           req.body?.deleteLabels,
+          req.body.expectedRevision,
         );
         res.status(200).json(result);
       } catch (err) {
-        res
-          .status(400)
-          .json({ updated: false, err: "failed to update the labels" });
-        console.log(err);
+        sendBackupMutationError(res, err);
       }
     });
 
@@ -1066,8 +1072,74 @@ export default class Routes {
 
     router.post("/getBackupSnapshot", async (req, res) => {
       if (typeof req.body.appId !== "string" || !req.body.appId) return res.status(400).json({ error: "Invalid backup account" });
-      try { return res.status(200).json(await getBackupSnapshot(req.body.appId)); }
+      try { return res.status(200).json({
+        ...await getBackupSnapshot(req.body.appId), revisionedMutations:true,
+      }); }
       catch { return res.status(503).json({ error: "Backup snapshot unavailable" }); }
+    });
+    // A distinct route prevents a revisioned client from writing through an old
+    // Relay instance that would silently ignore expectedRevision. Deploy this
+    // route to every instance before enabling it in mobile clients.
+    router.post("/revisionedBackupMutation", async (req, res) => {
+      const body = req.body || {};
+      if (typeof body.appId !== "string" || !body.appId ||
+          typeof body.expectedRevision !== "string" || !/^[a-f0-9]{64}$/.test(body.expectedRevision))
+        return res.status(400).json({updated:false,error:"BACKUP_NOT_UPDATED"});
+      if (body.appID !== undefined && body.appID !== body.appId)
+        return res.status(400).json({updated:false,error:"BACKUP_NOT_UPDATED"});
+      try {
+        let result: any;
+        switch (body.operation) {
+          case "updateAppImage":
+            if (("walletsObject" in body && "walletObject" in body) ||
+                ("signersObject" in body && "signersObjects" in body))
+              throw new InvalidBackupRequest("Conflicting backup record fields");
+            result = await bhr.updateAppImage(body.appId, body.publicId,
+              "walletsObject" in body ? body.walletsObject : body.walletObject,
+              body.subscription, body.version,
+              "signersObject" in body ? body.signersObject : body.signersObjects,
+              body.nodes, body.replaceNodes === true, body.expectedRevision);
+            break;
+          case "migrateXfps":
+            result = await bhr.migrateXfp(body.appId, body.signerChanges, body.expectedRevision);
+            break;
+          case "deleteAppImageEntity":
+            result = await bhr.deleteAppImageEntity(body.appId, body.walletIds,
+              body.signers, body.expectedRevision);
+            break;
+          case "deleteVaults":
+            result = await bhr.deleteVaults(body.appId, body.vaults, body.expectedRevision);
+            break;
+          case "updateVaultImage":
+            if (typeof body.vaultId !== "string" || !body.vaultId)
+              throw new InvalidBackupRequest("Invalid vault ID");
+            result = body.isUpdate
+              ? await bhr.updateVault(body.vaultId, body.vault, body.appId,
+                  body.isArchived, body.signersData, body.expectedRevision)
+              : await bhr.addVaultImage(body.appId, body.vaultShellId, body.vaultId,
+                  body.scheme, body.vault, body.signersData, body.subscription,
+                  body.archiveVaultId, body.isArchived, body.expectedRevision);
+            break;
+          case "modifyLabels":
+            result = await bhr.modifyLabels(body.appId, body.addLabels,
+              body.deleteLabels, body.expectedRevision);
+            break;
+          case "deleteBackup":
+            result = await bhr.deleteBackup(body.appId, body.expectedRevision);
+            break;
+          case "repairAppBackup":
+            result = await repairAppBackup(body, true);
+            break;
+          default:
+            throw new InvalidBackupRequest("Unknown backup mutation");
+        }
+        if (result === false || result?.updated === false ||
+            typeof result?.newRevision !== "string" || !/^[a-f0-9]{64}$/.test(result.newRevision))
+          return res.status(503).json({updated:false,error:"BACKUP_NOT_UPDATED"});
+        return res.status(200).json({updated:true,preconditionApplied:true,newRevision:result.newRevision});
+      } catch (error) {
+        return sendBackupMutationError(res, error);
+      }
     });
     router.post("/repairAppBackup", async (req, res) => {
       try { return res.status(200).json(await repairAppBackup(req.body)); }
@@ -1098,11 +1170,10 @@ export default class Routes {
         return res.status(400).json({ err: "Input param missing - app's id" });
       }
       try {
-        const result = await bhr.deleteBackup(req.body.appId);
+        const result = await bhr.deleteBackup(req.body.appId, req.body.expectedRevision);
         res.status(200).json(result);
       } catch (err) {
-        console.log("🚀 ~deleteBackup err:", err);
-        res.status(400).json(err);
+        sendBackupMutationError(res, err);
       }
     });
 

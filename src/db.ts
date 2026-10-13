@@ -153,6 +153,9 @@ class Database {
     nodes: [{ type: String, required: false }],
     // Once repaired, unversioned full replacements must never overwrite this image.
     backupRevisionRequired: { type: Boolean, default: false },
+    // A revisioned incremental writer has claimed this account. Older clients
+    // must not apply delayed unversioned mutations after that writer commits.
+    incrementalRevisionRequired: { type: Boolean, default: false },
     // Retained by Delete Backup, preventing stale A → B → A revisions.
     backupGeneration: { type: Number, default: 0, min: 0 },
   });
@@ -327,6 +330,8 @@ class Database {
       { unique: true },
     );
     this.articleChunkSchema.index({ ragTimestamp: -1 });
+    // Snapshot ownership checks must not scan every account for each label.
+    this.appImageSchema.index({ labels: 1 });
     this.appVaultImageSchema.index({ appId: 1, vaultId: 1 }, { unique: true });
     this.faucetQuotaSchema.index({ appId: 1, utcDate: 1 }, { unique: true });
     this.faucetQuotaSchema.index(

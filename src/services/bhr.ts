@@ -8,6 +8,9 @@ import {
   deleteBackupVaults,
   getBackupSnapshot,
   withBackupMutation,
+  BackupConflict,
+  BackupUpgradeRequired,
+  InvalidBackupRequest,
 } from "./backupSnapshot";
 import { AppImage, AppSubscription } from "../interface";
 import db from "../db";
@@ -22,7 +25,8 @@ export const updateAppImage = async (
   version,
   signersObject,
   nodes,
-  replaceNodes = false
+  replaceNodes = false,
+  expectedRevision?: string
 ): Promise<{ updated: boolean; error?: string }> => {
   if (typeof appId !== "string" || !appId) return {updated:false,error:"Invalid backup account"};
   const appImageModel: any = db.getAppImageModel();
@@ -71,8 +75,9 @@ export const updateAppImage = async (
         await appImageModel.updateOne({ appId }, { $set:changes, $setOnInsert:defaults }, { upsert:true,runValidators:true,session });
       }
       return { updated:true,error:"" };
-    });
-  } catch {
+    }, expectedRevision, true);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated:false,error:"Backup update failed" };
   }
 };
@@ -80,19 +85,22 @@ export const updateAppImage = async (
 export const deleteAppImageEntity = async (
   appId,
   wallets,
-  signers
+  signers,
+  expectedRevision?: string
 ): Promise<{ updated: boolean; error?: string }> => {
   try {
-    return await deleteBackupEntities(appId, wallets, signers);
-  } catch {
+    return await deleteBackupEntities(appId, wallets, signers, expectedRevision);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Backup deletion failed" };
   }
 };
 
-export const deleteVaults = async (appId, vaults) => {
+export const deleteVaults = async (appId, vaults, expectedRevision?: string) => {
   try {
-    return await deleteBackupVaults(appId, vaults);
-  } catch {
+    return await deleteBackupVaults(appId, vaults, expectedRevision);
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Vault backup deletion failed" };
   }
 };
@@ -136,7 +144,8 @@ export const addVaultImage = async (
   signersData,
   subscription,
   archiveVaultId?,
-  isArchived?
+  isArchived?,
+  expectedRevision?: string
 ) => {
   try {
     return await saveBackupVault({
@@ -149,8 +158,10 @@ export const addVaultImage = async (
       subscription,
       archiveVaultId,
       isArchived,
+      expectedRevision,
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return { updated: false, error: "Vault backup update failed" };
   }
 };
@@ -163,7 +174,7 @@ export const archiveVault = async (vaultId) => {
   }
 };
 
-export const updateVault = async (vaultId, vault, appId?, isArchived?, signersData?) => {
+export const updateVault = async (vaultId, vault, appId?, isArchived?, signersData?, expectedRevision?: string) => {
   try {
     const result = await saveBackupVault({
       appId,
@@ -172,9 +183,11 @@ export const updateVault = async (vaultId, vault, appId?, isArchived?, signersDa
       isArchived,
       signersData,
       isUpdate: true,
+      expectedRevision,
     });
-    return result?.updated ? {} : false;
-  } catch {
+    return result?.updated ? (expectedRevision !== undefined ? {newRevision:result.newRevision} : {}) : false;
+  } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     return false;
   }
 };
@@ -237,7 +250,8 @@ export const getVaultImage = async (vaultId) => {
 
 export const getAppImage = async (appId, appversion) => {
   const snapshot = await getBackupSnapshot(appId);
-  if (snapshot.unavailableVaultIds.length) throw new Error("Recovery data unavailable");
+  if (snapshot.unavailableVaultIds.length || snapshot.unavailableLabelIds.length)
+    throw new Error("Recovery data unavailable");
   const appImage = snapshot.exists
     ? snapshot.appImage
     : { ...snapshot.appImage, version: appversion };
@@ -307,7 +321,8 @@ interface SignerChange {
 
 export const migrateXfp = async (
   appId: string,
-  signerChanges: SignerChange[]
+  signerChanges: SignerChange[],
+  expectedRevision?: string
 ) => {
   try {
     return await withBackupMutation(appId, async session => {
@@ -327,14 +342,15 @@ export const migrateXfp = async (
       } else {
         return false;
       }
-    });
+    }, expectedRevision, true);
   } catch (err) {
+    if (err instanceof BackupConflict || (expectedRevision !== undefined && err instanceof BackupUpgradeRequired)) throw err;
     console.log(err);
     return false;
   }
 };
 
-export const modifyLabels = async (appId, addLabels, deleteLabels) => {
+export const modifyLabels = async (appId, addLabels, deleteLabels, expectedRevision?: string) => {
   try {
     return await withBackupMutation(appId, async session => {
       const appImageModel: any = db.getAppImageModel();
@@ -348,40 +364,50 @@ export const modifyLabels = async (appId, addLabels, deleteLabels) => {
       if (addLabels && addLabels.length > 0) {
         const newLabels = [];
         for (const label of addLabels) {
-          if (!label || !label.content) {
-            continue;
-          }
-          // Check if label exists
+          if (!label || typeof label.id !== "string" || !label.id || /[.$]/.test(label.id) ||
+              typeof label.content !== "string" || !label.content)
+            throw new InvalidBackupRequest("Invalid encrypted label");
+          const otherOwner = await appImageModel.findOne({
+            appId: {$ne:appId}, labels:label.id,
+          }).session(session).lean();
+          if (otherOwner) throw new BackupConflict();
           const existingLabel = await labelModel.findOne({ id: label.id }).session(session);
           if (existingLabel) {
+            await labelModel.updateOne({id:label.id}, {$set:{content:label.content}}, {session});
             newLabels.push(existingLabel.id);
           } else {
-            // need to create that label
             const createdLabels = await labelModel.create([label], {session});
             newLabels.push(createdLabels[0].id);
           }
         }
 
         appImage.labels = appImage.labels || [];
-        appImage.labels.push(...newLabels);
+        for (const id of newLabels) if (!appImage.labels.includes(id)) appImage.labels.push(id);
         await appImage.save({session});
       }
 
       if (deleteLabels && deleteLabels.length > 0) {
-        const deletedLabels = await labelModel.deleteMany({
-          id: { $in: deleteLabels },
-        }).session(session);
-        if (appImage.labels && appImage.labels.length > 0) {
-          appImage.labels = appImage.labels.filter(
-            (labelId) => !deleteLabels.includes(labelId.toString())
-          );
+        if (!Array.isArray(deleteLabels) || deleteLabels.some(id =>
+            typeof id !== "string" || !id || /[.$]/.test(id)))
+          throw new InvalidBackupRequest("Invalid encrypted label IDs");
+        const owned = new Set((appImage.labels || []).map(id => id.toString()));
+        const removed = deleteLabels.filter(id => owned.has(id));
+        if (removed.length) {
+          appImage.labels = appImage.labels.filter(labelId => !removed.includes(labelId.toString()));
+          await appImage.save({session});
+          for (const id of removed) {
+            const otherOwner = await appImageModel.findOne({
+              appId: {$ne:appId}, labels:id,
+            }).session(session).lean();
+            if (!otherOwner) await labelModel.deleteOne({id}).session(session);
+          }
         }
-        await appImage.save({session});
       }
 
       return { updated: true };
-    });
+    }, expectedRevision, true);
   } catch (error) {
+    if (error instanceof BackupConflict || (expectedRevision !== undefined && error instanceof BackupUpgradeRequired)) throw error;
     console.error("Error modifying labels:", error);
     throw new Error("An error occurred while modifying labels");
   }

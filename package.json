@@ -10,6 +10,7 @@
     "test": "npm run compile && jest ./dist --detectOpenHandles",
     "gcp-build": "tsc -p .",
     "test:backup": "node --test tests/*.test.cjs",
+    "test:automatic-http": "node --test tests/integration/automaticBackupHttp.test.cjs",
     "check:secrets": "python3 scripts/check-source-secrets.py"
   },
   "jest": {
