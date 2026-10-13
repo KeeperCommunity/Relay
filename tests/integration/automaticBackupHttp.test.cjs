@@ -166,6 +166,35 @@ test('seed preserves subscription metadata through the actual revisioned repair'
   assert.equal(input.snapshot.appImage.version, '2.6.4');
 });
 
+test('fresh createNewApp image gains subscription during acknowledged revisioned repair', async () => {
+  await fixture.reset();
+  const appId = 'synthetic-fresh-account-repair-metadata';
+  const publicId = `public-${appId}`;
+  const created = await fixture.post('createNewApp', { appID: appId, publicId }, 200, { os: 'android' });
+  assert.equal(created.data.created, true);
+  const before = await fixture.snapshot(appId);
+  assert.equal(before.exists, true);
+  assert.equal(before.appImage.subscription, undefined);
+  const subscription = JSON.stringify({ level: 3, isCancelled: false });
+  const repair = { operation: 'repairAppBackup', appId, publicId,
+    expectedRevision: before.revision, replaceCurrentState: true,
+    version: '2.6.4', subscription,
+    walletObject: { wallet: cipher(wallet) }, signersObject: {},
+    vaultObject: {}, nodes: [], labels: [] };
+  const acknowledgement = await fixture.post('revisionedBackupMutation', repair);
+  assert.equal(acknowledgement.data.updated, true);
+  assert.equal(acknowledgement.data.preconditionApplied, true);
+  const readback = await fixture.snapshot(appId);
+  assert.equal(acknowledgement.data.newRevision, readback.revision);
+  assert.notEqual(readback.revision, before.revision);
+  assert.equal(readback.appImage.subscription, subscription);
+  assert.equal(readback.appImage.publicId, publicId);
+  assert.equal(readback.appImage.version, '2.6.4');
+  assert.equal(decode(readback.appImage.wallets.wallet).name, 'before');
+  await fixture.post('revisionedBackupMutation', repair, 409);
+  assert.equal((await fixture.snapshot(appId)).revision, readback.revision);
+});
+
 for (const [field, value] of Object.entries({ publicId: 'synthetic-other-public-id',
   version: 'stale-fixture-version', subscription: '{"level":999}' })) {
   test(`snapshot ${field} metadata fault changes only delivery after a real transactional read`, async () => {

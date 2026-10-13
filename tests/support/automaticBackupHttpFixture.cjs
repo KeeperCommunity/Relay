@@ -56,7 +56,7 @@ function registerProductionRoutes(router, dependencies) {
   const text = fs.readFileSync(filename, 'utf8');
   const tree = ts.createSourceFile(filename, text, ts.ScriptTarget.Latest, true);
   const selected = [];
-  const required = new Set(['/getBackupSnapshot', '/revisionedBackupMutation', '/getAppImage']);
+  const required = new Set(['/createNewApp', '/getBackupSnapshot', '/revisionedBackupMutation', '/getAppImage']);
   function visit(node) {
     if (ts.isFunctionDeclaration(node) && node.name?.text === 'sendBackupMutationError') selected.push(node.getText(tree));
     if (ts.isCallExpression(node) && node.expression.getText(tree) === 'router.post' && required.has(node.arguments[0]?.text)) {
@@ -171,7 +171,8 @@ async function createFixture(options = {}) {
       };
       start().catch(next);
     });
-    registerProductionRoutes(router, { bhr, ...service });
+    const { createNewApp } = loader.load('src/services/app.ts');
+    registerProductionRoutes(router, { bhr, createNewApp, ...service });
     const app = express();
     app.use(express.json({ limit: '50mb' }));
     app.use(loader.load('src/localDevelopment.ts').localDevelopmentRoutes);

@@ -507,11 +507,16 @@ async function writeBackup(data: any, legacy: boolean, activateIncrementalFence 
     }
     // Updating this document also makes concurrent membership edits conflict
     // with the transaction instead of being lost in a full-snapshot write.
+    // A new account already has an empty AppImage from createNewApp. Its first
+    // explicit repair must persist the recovery subscription on that image,
+    // not only when an AppImage is inserted by this write.
+    const subscription = typeof data.subscription === "string" ? { subscription:data.subscription } : {};
     await db.getAppImageModel().updateOne({ appId:data.appId }, { $set:{
       wallets:data.walletObject, signers:data.signersObject, nodes:data.nodes,
       vaults:Object.keys(data.vaultObject), labels:data.labels.map(l => l.id), version:data.version,
       ...(!legacy ? { backupRevisionRequired:true } : {}),
-    }, $setOnInsert:{ appId:data.appId, publicId:data.publicId, subscription:data.subscription } }, {upsert:true,session});
+      ...(!legacy ? subscription : {}),
+    }, $setOnInsert:{ appId:data.appId, publicId:data.publicId, ...(legacy ? subscription : {}) } }, {upsert:true,session});
     return { updated:true };
   }, legacy ? undefined : data.expectedRevision, activateIncrementalFence);
 }
