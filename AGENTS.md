@@ -1,0 +1,5 @@
+# Repository agent instructions
+
+Read and follow [.github/REVIEW_POLICY.md](.github/REVIEW_POLICY.md) before opening or updating a pull request. Use the PR template to choose Skip provider review / Lite / Balanced from actual severity, uncertainty, scope and cost. Cloud review replaces mandatory human developer approval when warranted; human review is optional. Independent coverage is needed only when actual risk/findings require it and installed scope/budget permit. Record the decision, real checks, reviewed SHA/coverage and findings/dispositions. Avoid repeated provider requests for drafts/every push, and report unavailable routes or unresolved substantive security concerns honestly.
+
+Preserve existing repository conventions. Complete feasible agent verification before delivery, scaled to the change; documentation changes need link, formatting, and diff checks. Human live verification remains retrospective after delivery. Retain existing required checks before merge. Record requested human feedback and its disposition without making approval a merge gate.
