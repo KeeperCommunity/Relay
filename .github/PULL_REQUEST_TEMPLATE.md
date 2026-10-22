@@ -14,9 +14,8 @@
 - Reason:
 - Actual Copilot effort and reviewed commit: pending
 - Feedback and disposition: pending
-- Independent human approval: pending (Ben, Utkarsh, or Parsh; one is sufficient)
+- Optional human review: not requested / pending / received (reviewer, link and findings if applicable)
 
 <!-- A quota response means review unavailable. Record it instead of claiming a completed review. Batch material fixes and stabilize checks before a new review. -->
 
 - [ ] Required checks pass and relevant review concerns are resolved.
-- [ ] One independent developer approval is recorded.

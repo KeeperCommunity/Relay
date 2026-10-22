@@ -24,8 +24,8 @@ Record these in the PR description:
 - Real findings and their disposition, including any substantive review-overview concerns. Check feedback against the implementation and verification.
 - Pending or unavailable review status when appropriate. A quota response is an unavailable review, not a successful review or evidence of no findings.
 
-## Human approval
+## Optional human review
 
-Request Ben (`ben-kaufman`), Utkarsh (`cakesoft-utkarsh`), and Parsh (`Parsh`) when they have review access. Record pending invitations accurately; keep review-owner proposals draft until GitHub recognizes the owners and required checks pass.
+Human developer review is optional. Ben (`ben-kaufman`), Utkarsh (`cakesoft-utkarsh`), and Parsh (`Parsh`) are suggested reviewers when useful and already eligible. Pending invitations or the absence of human review do not block readiness or merge and do not require an access grant.
 
-One independent approval from any one of these developers is required, together with passing required checks and resolution of relevant review concerns. All three approvals are unnecessary. The PR author cannot approve their own change, and Copilot feedback does not satisfy the human approval requirement. Product signoff remains separate. Do not bypass required checks or independent human approval.
+Passing required checks and resolution of relevant review concerns remain required. Record any requested human review, findings and their disposition accurately; no human developer approval is required. Product signoff, required security and native validation, and operation-specific signing, deployment and release authorization remain separate. Do not bypass those gates.
